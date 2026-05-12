@@ -92,26 +92,30 @@
       }, { once: true });
     });
 
-    // "Back" from name-entry → return to start screen
-    document.getElementById("name-back-btn").addEventListener("click", () => {
+    // "Back" / red-X from name-entry → return to start screen
+    function _leaveToStartScreen() {
       lobby$().classList.remove("visible");
       startScreen$().classList.remove("hidden");
       startScreen$().style.opacity = "1";
       startScreen$().style.pointerEvents = "";
-    });
+    }
+    document.getElementById("name-back-btn").addEventListener("click", _leaveToStartScreen);
+    document.getElementById("online-name-close").addEventListener("click", _leaveToStartScreen);
 
     // "Join" — submit name
     document.getElementById("name-confirm-btn").addEventListener("click", _submitName);
     nameInput$().addEventListener("keydown", e => { if (e.key === "Enter") _submitName(); });
 
-    // "Leave" from lobby room → disconnect and back to start screen
-    document.getElementById("lobby-back-btn").addEventListener("click", () => {
+    // "Leave" / red-X from lobby room → disconnect and back to start screen
+    function _leaveLobbyToStartScreen() {
       if (socket) socket.emit("lobby:leave");
       lobby$().classList.remove("visible");
       startScreen$().classList.remove("hidden");
       startScreen$().style.opacity = "1";
       startScreen$().style.pointerEvents = "";
-    });
+    }
+    document.getElementById("lobby-back-btn").addEventListener("click", _leaveLobbyToStartScreen);
+    document.getElementById("online-lobby-close").addEventListener("click", _leaveLobbyToStartScreen);
 
     // Challenge modal — Accept
     document.getElementById("challenge-accept-btn").addEventListener("click", () => {
@@ -279,10 +283,11 @@
     drawAll();
   }
 
-  function _applyOpponentMove(fromRow, fromCol, toRow, toCol) {
+  function _applyOpponentMove(fromRow, fromCol, toRow, toCol, isEnPassant, newEnPassant) {
     const from = { row: fromRow, col: fromCol };
     const to   = { row: toRow,   col: toCol   };
-    applyMoveOnBoard(state.board, from, to, { recordCapture: true });
+    applyMoveOnBoard(state.board, from, to, { recordCapture: true, isEnPassant });
+    state.enPassant = newEnPassant || null;
     drawAll();
   }
 
@@ -388,13 +393,11 @@
       drawAll();
     });
 
-    socket.on("game:moved", ({ fromRow, fromCol, toRow, toCol }) => {
-      _applyOpponentMove(fromRow, fromCol, toRow, toCol);
-      // turn_change will follow separately — just redraw here
+    socket.on("game:moved", ({ fromRow, fromCol, toRow, toCol, isEnPassant, newEnPassant }) => {
+      _applyOpponentMove(fromRow, fromCol, toRow, toCol, isEnPassant, newEnPassant);
     });
 
     socket.on("game:over", ({ reason, winner }) => {
-      // Server-side checkmate/stalemate/resign/forfeit
       if (reason === "resign") {
         const iWon = winner === myColor;
         showEndScreen("Aufgabe!", iWon ? "Gegner hat aufgegeben — du gewinnst!" : "Du hast aufgegeben.");
@@ -402,6 +405,9 @@
         showEndScreen("Sieg!", "Gegner hat nicht reconnected — du gewinnst!");
       } else if (reason === "stalemate") {
         showEndScreen("Patt", "Unentschieden — kein gültiger Zug.");
+      } else if (reason === "immediateCheck") {
+        const iWon = winner === myColor;
+        showEndScreen("Sofortniederlage!", iWon ? "Gegner's König stand sofort im Schach — du gewinnst!" : "Dein König stand sofort im Schach — du verlierst!");
       }
       // checkmate is handled locally by checkGameOver()
       state.phase = PH_END;
@@ -428,8 +434,7 @@
 
     socket.on("game:reconnected", ({ color, opponentName, board, budgets,
                                      hotbars, phase, current, setupDone,
-                                     kingsPlaced, captured }) => {
-      // Full resync after returning from a disconnect
+                                     kingsPlaced, captured, enPassant }) => {
       _startOnlineGame(color, opponentName, hotbars[0], hotbars[1]);
       state.board       = board;
       state.budgets     = budgets;
@@ -438,6 +443,7 @@
       state.setupDone   = setupDone;
       state.kingsPlaced = kingsPlaced;
       state.captured    = captured;
+      state.enPassant   = enPassant || null;
       discOverlay$().classList.add("hidden");
       drawAll();
     });

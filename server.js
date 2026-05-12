@@ -71,7 +71,7 @@ function slide(board, row, col, p, dirs, push) {
   }
 }
 
-function pseudoMoves(board, row, col) {
+function pseudoMoves(board, row, col, enPassant = null) {
   const p = board[row][col];
   if (!p) return [];
   const moves = [];
@@ -93,11 +93,26 @@ function pseudoMoves(board, row, col) {
       const dir = pawnDir(p.color);
       const fr = row + dir;
       if (inBounds(fr, col) && !board[fr][col]) push(fr, col, false);
+      // 2-square forward from starting rows
+      const fr2 = row + 2 * dir;
+      if (ownHalfRows(p.color).includes(row)
+          && inBounds(fr, col) && !board[fr][col]
+          && inBounds(fr2, col) && !board[fr2][col]) {
+        moves.push({ row: fr2, col, capture: false, twoSquare: true });
+      }
       for (const dc of [-1, 1]) {
         const nc = col + dc;
         if (!inBounds(fr, nc)) continue;
         const t = board[fr][nc];
         if (t && t.color !== p.color) push(fr, nc, true);
+      }
+      // En passant
+      if (enPassant) {
+        for (const dc of [-1, 1]) {
+          if (fr === enPassant.row && col + dc === enPassant.col) {
+            moves.push({ row: enPassant.row, col: enPassant.col, capture: true, isEnPassant: true });
+          }
+        }
       }
       break;
     }
@@ -114,6 +129,14 @@ function pseudoMoves(board, row, col) {
         if (!inBounds(fr1, nc)) continue;
         const t = board[fr1][nc];
         if (t && t.color !== p.color) push(fr1, nc, true);
+      }
+      // En passant for Doppelbauer too
+      if (enPassant) {
+        for (const dc of [-1, 1]) {
+          if (fr1 === enPassant.row && col + dc === enPassant.col) {
+            moves.push({ row: enPassant.row, col: enPassant.col, capture: true, isEnPassant: true });
+          }
+        }
       }
       break;
     }
@@ -133,6 +156,14 @@ function pseudoMoves(board, row, col) {
     case "05": slide(board, row, col, p, [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]], push); break;
   }
   return moves;
+}
+
+function onlyKingsLeft(board) {
+  for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) {
+    const p = board[r][c];
+    if (p && p.type !== "00") return false;
+  }
+  return true;
 }
 
 function findKing(board, color) {
@@ -159,7 +190,7 @@ function isInCheck(board, color) {
   return isSquareAttacked(board, k.row, k.col, 1 - color);
 }
 
-function applyMoveServer(board, from, to) {
+function applyMoveServer(board, from, to, opts = {}) {
   const piece  = board[from.row][from.col];
   const target = board[to.row][to.col];
   let movedPiece = { ...piece };
@@ -170,27 +201,32 @@ function applyMoveServer(board, from, to) {
   }
   board[to.row][to.col] = movedPiece;
   board[from.row][from.col] = null;
+  if (opts.isEnPassant) {
+    const epPawn = board[from.row][to.col];
+    board[from.row][to.col] = null;
+    return epPawn;
+  }
   return target;
 }
 
-function legalMovesServer(board, row, col) {
+function legalMovesServer(board, row, col, enPassant = null) {
   const p = board[row][col];
   if (!p) return [];
-  const pseudo = pseudoMoves(board, row, col);
+  const pseudo = pseudoMoves(board, row, col, enPassant);
   const result = [];
   for (const m of pseudo) {
     const sim = cloneBoard(board);
-    applyMoveServer(sim, { row, col }, { row: m.row, col: m.col });
+    applyMoveServer(sim, { row, col }, { row: m.row, col: m.col }, { isEnPassant: m.isEnPassant });
     if (!isInCheck(sim, p.color)) result.push(m);
   }
   return result;
 }
 
-function hasAnyLegalMove(board, color) {
+function hasAnyLegalMove(board, color, enPassant = null) {
   for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) {
     const p = board[r][c];
     if (!p || p.color !== color) continue;
-    if (legalMovesServer(board, r, c).length > 0) return true;
+    if (legalMovesServer(board, r, c, enPassant).length > 0) return true;
   }
   return false;
 }
@@ -250,6 +286,7 @@ function createGame(p1SocketId, p2SocketId, p1Name, p2Name) {
     setupDone:   [false, false],
     captured:    [[], []],
     winner:      null,
+    enPassant:   null,
   };
   games.set(gameId, g);
   socketToGame.set(p1SocketId, gameId);
@@ -276,10 +313,15 @@ function cleanupGame(gameId) {
 }
 
 function checkGameOverServer(g) {
-  if (!hasAnyLegalMove(g.board, g.current)) {
+  if (onlyKingsLeft(g.board)) {
+    g.phase  = PH_END;
+    g.winner = null;
+    return true;
+  }
+  if (!hasAnyLegalMove(g.board, g.current, g.enPassant)) {
     const inCheck = isInCheck(g.board, g.current);
     g.phase  = PH_END;
-    g.winner = inCheck ? 1 - g.current : null; // null = stalemate
+    g.winner = inCheck ? 1 - g.current : null;
     return true;
   }
   return false;
@@ -331,6 +373,7 @@ io.on("connection", socket => {
           setupDone:   g.setupDone,
           kingsPlaced: g.kingsPlaced,
           captured:    g.captured,
+          enPassant:   g.enPassant,
         });
         return;
       }
@@ -508,21 +551,30 @@ io.on("connection", socket => {
     const piece = g.board[fromRow]?.[fromCol];
     if (!piece || piece.color !== color) return;
 
-    // Server-side legality check
-    const legal = legalMovesServer(g.board, fromRow, fromCol);
-    const isLegal = legal.some(m => m.row === toRow && m.col === toCol);
-    if (!isLegal) {
+    // Server-side legality check (with en passant)
+    const legal = legalMovesServer(g.board, fromRow, fromCol, g.enPassant);
+    const move = legal.find(m => m.row === toRow && m.col === toCol);
+    if (!move) {
       console.warn(`  illegal move attempted by "${g.names[color]}"`);
       return;
     }
 
-    const captured = applyMoveServer(g.board, from, to);
+    const newEnPassant = (piece.type === "01" && move.twoSquare)
+      ? { row: (fromRow + toRow) / 2, col: fromCol }
+      : null;
+
+    const captured = applyMoveServer(g.board, from, to, { isEnPassant: move.isEnPassant });
     if (captured) g.captured[captured.color].push({ ...captured });
 
+    g.enPassant = newEnPassant;
     g.current = 1 - color;
 
     const oppId = g.players[1 - color];
-    io.to(oppId).emit("game:moved", { fromRow, fromCol, toRow, toCol });
+    io.to(oppId).emit("game:moved", {
+      fromRow, fromCol, toRow, toCol,
+      isEnPassant: move.isEnPassant || false,
+      newEnPassant,
+    });
 
     // Check game over
     if (checkGameOverServer(g)) {
@@ -603,10 +655,23 @@ io.on("connection", socket => {
 // ── Shared setup-turn logic ──────────────────────────────────
 function _advanceSetupTurn(g) {
   if (g.setupDone[P1] && g.setupDone[P2]) {
-    g.phase   = PH_PLAY;
-    g.current = P1;
+    g.phase      = PH_PLAY;
+    g.current    = P1;
+    g.enPassant  = null;
     io.to(g.players[P1]).emit("game:phase_change", { phase: PH_PLAY, current: P1 });
     io.to(g.players[P2]).emit("game:phase_change", { phase: PH_PLAY, current: P1 });
+    // Sofortniederlage: König steht sofort im Schach
+    for (const color of [P1, P2]) {
+      if (isInCheck(g.board, color)) {
+        g.phase  = PH_END;
+        g.winner = 1 - color;
+        const overPayload = { reason: "immediateCheck", winner: g.winner };
+        io.to(g.players[P1]).emit("game:over", overPayload);
+        io.to(g.players[P2]).emit("game:over", overPayload);
+        cleanupGame(g.id);
+        return;
+      }
+    }
     return;
   }
   // Alternate turns, skipping players who are done

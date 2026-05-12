@@ -36,6 +36,19 @@ let hoverZoomCell        = null;   // {row, col} board piece being zoomed
 let hoverZoomHotbarSlot  = null;   // 0–3 hotbar slot being zoomed
 let hoverZoomRAFId       = null;
 
+// ── Drag-Tilt setting + state ────────────────────────────────
+let dragTilt = true;
+let _dragTiltVX       = 0;      // smoothed horizontal velocity (px/s)
+let _dragTiltLastX    = null;
+let _dragTiltLastT    = null;
+let _dragTiltDecayRAF = null;
+const DRAG_TILT_MAX   = 16;     // degrees
+const DRAG_TILT_SCALE = 0.048;  // px/s → degrees
+
+// ── Hover move-preview state (PH_PLAY: faint dots where hovered piece can go) ──
+let _hoverPreviewCell  = null;   // {row, col} of the piece being previewed
+let _hoverPreviewMoves = null;   // array of pseudo-move targets [{row,col,capture}, ...]
+
 // ── Sway helpers ──────────────────────────────────────────────
 // Deterministic per-cell noise so each piece has its own rhythm
 function _posRand(r, c, seed) {
@@ -98,9 +111,11 @@ const PIECE_INFO = {
   "04": { name: "Turm",        cost: 5, skins: 1  },
   "05": { name: "Dame",        cost: 9, skins: 6  },
   "06": { name: "Doppelbauer", cost: 1, skins: 10 },
+  "10": { name: "Blocker",     cost: 4, skins: 1  },
+  "11": { name: "Sumoringer",  cost: 5, skins: 1  },
 };
 
-const HOTBAR_TYPES = ["01", "02", "03", "04", "05"];
+const HOTBAR_TYPES = ["01", "02", "03", "04", "05", "10", "11"];
 
 const P1 = 0, P2 = 1;
 const PH_KING_PLACE = "kingPlace";
@@ -184,6 +199,9 @@ const state = {
   // Graveyards: captured[color] = list of pieces of THAT color that were captured
   captured: [[], []],
 
+  // En passant target square after a pawn double-move, or null
+  enPassant: null,
+
   // Online multiplayer — populated by online.js when active
   online: {
     active:       false,
@@ -239,7 +257,7 @@ async function preload() {
       list.push(`images/figures/1${t}${s}.png`);
     }
   }
-  await Promise.all(list.map(loadImage));
+  await Promise.allSettled(list.map(loadImage));
   // Wait for the pixel font so canvas text uses it
   if (document.fonts && document.fonts.ready) {
     try { await document.fonts.load("8px 'Press Start 2P'"); } catch (e) {}
@@ -340,7 +358,10 @@ function recomputeSetupDoneAfterPlacement(player) {
 function inBounds(r, c) { return r >= 0 && r < 8 && c >= 0 && c < 8; }
 function pawnDir(color) { return color === 0 ? +1 : -1; }
 
-function pseudoMoves(board, row, col) {
+// Blocker (type "10") cannot be captured by any piece
+function isBlocker(p) { return p && p.type === "10"; }
+
+function pseudoMoves(board, row, col, enPassant = null) {
   const p = board[row][col];
   if (!p) return [];
   const moves = [];
@@ -353,8 +374,9 @@ function pseudoMoves(board, row, col) {
         const nr = row + dr, nc = col + dc;
         if (!inBounds(nr, nc)) continue;
         const t = board[nr][nc];
+        const straight = (dr === 0 || dc === 0);
         if (!t) push(nr, nc, false);
-        else if (t.color !== p.color) push(nr, nc, true);
+        else if (t.color !== p.color && !(isBlocker(t) && straight)) push(nr, nc, true);
       }
       break;
     }
@@ -362,11 +384,24 @@ function pseudoMoves(board, row, col) {
       const dir = pawnDir(p.color);
       const fr = row + dir;
       if (inBounds(fr, col) && !board[fr][col]) push(fr, col, false);
+      const fr2 = row + 2 * dir;
+      if (ownHalfRows(p.color).includes(row)
+          && inBounds(fr, col) && !board[fr][col]
+          && inBounds(fr2, col) && !board[fr2][col]) {
+        moves.push({ row: fr2, col, capture: false, twoSquare: true });
+      }
       for (const dc of [-1, 1]) {
         const nc = col + dc;
         if (!inBounds(fr, nc)) continue;
         const t = board[fr][nc];
         if (t && t.color !== p.color) push(fr, nc, true);
+      }
+      if (enPassant) {
+        for (const dc of [-1, 1]) {
+          if (fr === enPassant.row && col + dc === enPassant.col) {
+            moves.push({ row: enPassant.row, col: enPassant.col, capture: true, isEnPassant: true });
+          }
+        }
       }
       break;
     }
@@ -375,7 +410,8 @@ function pseudoMoves(board, row, col) {
       const fr1 = row + dir, fr2 = row + 2 * dir;
       if (inBounds(fr1, col) && !board[fr1][col]) push(fr1, col, false);
       if (inBounds(fr1, col) && inBounds(fr2, col)
-          && !board[fr1][col] && board[fr2][col] && board[fr2][col].color !== p.color) {
+          && !board[fr1][col] && board[fr2][col]
+          && board[fr2][col].color !== p.color) {
         push(fr2, col, true);
       }
       for (const dc of [-1, 1]) {
@@ -383,6 +419,13 @@ function pseudoMoves(board, row, col) {
         if (!inBounds(fr1, nc)) continue;
         const t = board[fr1][nc];
         if (t && t.color !== p.color) push(fr1, nc, true);
+      }
+      if (enPassant) {
+        for (const dc of [-1, 1]) {
+          if (fr1 === enPassant.row && col + dc === enPassant.col) {
+            moves.push({ row: enPassant.row, col: enPassant.col, capture: true, isEnPassant: true });
+          }
+        }
       }
       break;
     }
@@ -400,17 +443,80 @@ function pseudoMoves(board, row, col) {
     }
     case "04": slide(board, row, col, p, [[1,0],[-1,0],[0,1],[0,-1]], push); break;
     case "05": slide(board, row, col, p, [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]], push); break;
+
+    // ── Blocker ("10"): Turm-Züge, kann nicht schlagen und nicht geschlagen werden
+    case "10": {
+      const dirs10 = [[1,0],[-1,0],[0,1],[0,-1]];
+      for (const [dr, dc] of dirs10) {
+        let r = row + dr, c = col + dc;
+        while (inBounds(r, c)) {
+          if (board[r][c]) break;          // blockiert von jeder Figur
+          push(r, c, false);               // nur leere Felder
+          r += dr; c += dc;
+        }
+      }
+      break;
+    }
+
+    // ── Sumoringer ("11"): 1-2 Felder gerade ODER 1 Feld diagonal
+    //    Schlägt normal; schiebt automatisch die Figur ONE Feld hinter dem Ziel
+    case "11": {
+      // Hilfsfunktion: liefert Push-Info falls die Figur hinter dem Zielfeld wegschiebbar ist
+      const sumoLand = (lr, lc, dr, dc, capture) => {
+        const beyond = { r: lr + dr, c: lc + dc };
+        if (inBounds(beyond.r, beyond.c) && board[beyond.r][beyond.c]) {
+          const pushDest = { r: beyond.r + dr, c: beyond.c + dc };
+          if (inBounds(pushDest.r, pushDest.c) && !board[pushDest.r][pushDest.c]) {
+            return { row: lr, col: lc, capture,
+                     isPush: true,
+                     pushFromRow: beyond.r, pushFromCol: beyond.c,
+                     pushToRow:   pushDest.r, pushToCol: pushDest.c };
+          }
+        }
+        return { row: lr, col: lc, capture };
+      };
+
+      // 1 und 2 Felder gerade
+      for (const [dr, dc] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const r1 = row + dr, c1 = col + dc;
+        if (!inBounds(r1, c1)) continue;
+        const t1 = board[r1][c1];
+        if (!t1) {
+          moves.push(sumoLand(r1, c1, dr, dc, false));
+          // 2 Felder (nur wenn 1. Feld frei)
+          const r2 = row + 2*dr, c2 = col + 2*dc;
+          if (inBounds(r2, c2)) {
+            const t2 = board[r2][c2];
+            if (!t2)                          moves.push(sumoLand(r2, c2, dr, dc, false));
+            else if (t2.color !== p.color)    moves.push(sumoLand(r2, c2, dr, dc, true));
+          }
+        } else if (t1.color !== p.color) {
+          moves.push(sumoLand(r1, c1, dr, dc, true));
+        }
+      }
+      // 1 Feld diagonal
+      for (const [dr, dc] of [[1,1],[1,-1],[-1,1],[-1,-1]]) {
+        const nr = row + dr, nc = col + dc;
+        if (!inBounds(nr, nc)) continue;
+        const t = board[nr][nc];
+        if (!t)                       moves.push(sumoLand(nr, nc, dr, dc, false));
+        else if (t.color !== p.color) moves.push(sumoLand(nr, nc, dr, dc, true));
+      }
+      break;
+    }
   }
   return moves;
 }
 
 function slide(board, row, col, p, dirs, push) {
   for (const [dr, dc] of dirs) {
+    const straight = (dr === 0 || dc === 0);
     let r = row + dr, c = col + dc;
     while (inBounds(r, c)) {
       const t = board[r][c];
       if (!t) push(r, c, false);
-      else { if (t.color !== p.color) push(r, c, true); break; }
+      // Blocker: immun gegen gerade Angriffe, nicht gegen diagonale
+      else { if (t.color !== p.color && !(isBlocker(t) && straight)) push(r, c, true); break; }
       r += dr; c += dc;
     }
   }
@@ -448,6 +554,13 @@ function applyMoveOnBoard(board, from, to, opts = {}) {
   const piece = board[from.row][from.col];
   const target = board[to.row][to.col];
   let movedPiece = { ...piece };
+
+  // Sumoringer push: Figur HINTER dem Zielfeld wird weitergeschoben (Seiteneffekt)
+  if (opts.isPush && opts.pushFromRow !== undefined) {
+    board[opts.pushToRow][opts.pushToCol] = board[opts.pushFromRow][opts.pushFromCol];
+    board[opts.pushFromRow][opts.pushFromCol] = null;
+  }
+
   // Bauer schlägt Bauer → wird Doppelbauer, behält Skin-Index
   if (piece.type === "01" && target && target.type === "01") {
     movedPiece.type = "06";
@@ -457,21 +570,29 @@ function applyMoveOnBoard(board, from, to, opts = {}) {
   }
   board[to.row][to.col] = movedPiece;
   board[from.row][from.col] = null;
-  // Record capture in graveyard (only when not simulating)
-  if (target && opts.recordCapture) {
-    state.captured[target.color].push({ ...target });
+
+  // En passant: captured pawn is on the FROM row, destination column
+  if (opts.isEnPassant) {
+    const epPawn = board[from.row][to.col];
+    if (epPawn && opts.recordCapture) state.captured[epPawn.color].push({ ...epPawn });
+    board[from.row][to.col] = null;
+    return { captured: epPawn };
   }
+  if (target && opts.recordCapture) state.captured[target.color].push({ ...target });
   return { captured: target };
 }
 
 function legalMoves(board, row, col) {
   const p = board[row][col];
   if (!p) return [];
-  const pseudo = pseudoMoves(board, row, col);
+  const pseudo = pseudoMoves(board, row, col, state.enPassant);
   const result = [];
   for (const m of pseudo) {
     const sim = cloneBoard(board);
-    applyMoveOnBoard(sim, { row, col }, { row: m.row, col: m.col });
+    applyMoveOnBoard(sim, { row, col }, { row: m.row, col: m.col }, {
+      isEnPassant: m.isEnPassant,
+      isPush: m.isPush, pushToRow: m.pushToRow, pushToCol: m.pushToCol,
+    });
     if (!isInCheck(sim, p.color)) result.push(m);
   }
   return result;
@@ -505,16 +626,24 @@ function drawAll() {
 const _capturedRendered = [0, 0];
 
 function renderCapturedPieces() {
+  // Each piece icon is 52px + 4px gap = 56px per slot.
+  // Board display height = BOARD_H * scale. Pieces per column = floor(boardPx / 56).
+  const boardDisplayH = Math.round(BOARD_H * state.scale);
+  const pieceSlotH    = 56; // 52px img + 4px gap
+  const piecesPerCol  = Math.max(1, Math.floor(boardDisplayH / pieceSlotH));
+
   for (const color of [0, 1]) {
     const container = document.getElementById(color === 0 ? "captured-left" : "captured-right");
     if (!container) continue;
     const list = state.captured[color];
-    // Reset case (e.g. new game) → if list shrunk, wipe and re-render fully
+    // Reset case → wipe and re-render
     if (list.length < _capturedRendered[color]) {
       container.innerHTML = "";
       _capturedRendered[color] = 0;
     }
-    // Append any new captures
+    // Update container height constraint so CSS wrapping kicks in at the right point
+    container.style.maxHeight = boardDisplayH + "px";
+
     for (let i = _capturedRendered[color]; i < list.length; i++) {
       const p = list[i];
       const img = document.createElement("img");
@@ -625,6 +754,20 @@ function drawBoard() {
     }
   }
 
+  // Hover move preview — faint semi-transparent dots showing pseudo-moves of hovered piece
+  if (_hoverPreviewMoves && _hoverPreviewMoves.length > 0) {
+    boardCtx.save();
+    boardCtx.globalAlpha = 0.30;
+    boardCtx.shadowColor = "transparent";
+    boardCtx.shadowBlur  = 0;
+    for (const m of _hoverPreviewMoves) {
+      const { x, y } = cellToCanvas(m.row, m.col);
+      const img = m.capture ? images["images/markerHit.png"] : images["images/marker.png"];
+      if (img) boardCtx.drawImage(img, x, y);
+    }
+    boardCtx.restore();
+  }
+
   // Markers ON TOP of pieces & hover preview (with colored glow drop-shadow)
   const highlights = currentHighlights();
   for (const h of highlights) {
@@ -706,6 +849,25 @@ function updateHoverFromClient(clientX, clientY) {
   // Hover zoom — own pieces only
   _updateBoardHoverZoom(cell);
 
+  // Hover move preview — show pseudo-moves of whatever piece is under the cursor
+  let previewChanged = false;
+  const piece = cell ? state.board[cell.row][cell.col] : null;
+  const prevCell = _hoverPreviewCell;
+  if (piece) {
+    const sameCell = prevCell && prevCell.row === cell.row && prevCell.col === cell.col;
+    if (!sameCell) {
+      _hoverPreviewCell  = cell;
+      _hoverPreviewMoves = pseudoMoves(state.board, cell.row, cell.col, state.enPassant);
+      previewChanged = true;
+    }
+  } else {
+    if (_hoverPreviewCell !== null) {
+      _hoverPreviewCell  = null;
+      _hoverPreviewMoves = null;
+      previewChanged = true;
+    }
+  }
+
   // Valid hover (only placement / move targets)
   const valid = cell && isValidHoverCell(cell) ? cell : null;
   const validChanged = !( valid && state.hoverCell
@@ -714,7 +876,7 @@ function updateHoverFromClient(clientX, clientY) {
 
   state.hoverCell = valid;
   // Sway loop redraws continuously; only manual redraw when not sway-looping
-  if (validChanged && (!fancyGraphics || !fancySway)) drawBoard();
+  if ((validChanged || previewChanged) && (!fancyGraphics || !fancySway)) drawBoard();
 }
 
 function _ownPlayerColor() {
@@ -970,6 +1132,9 @@ function setDragOverlay(visible, imgSrc) {
   } else {
     overlay.classList.remove("visible");
     overlay.src = TRANSPARENT_PIXEL;
+    // Reset tilt state
+    _dragTiltVX = 0; _dragTiltLastX = null; _dragTiltLastT = null;
+    overlay.style.transform = "";
   }
 }
 
@@ -978,6 +1143,39 @@ function moveDragOverlay(clientX, clientY) {
   const sz = state.scale * CELL;
   overlay.style.left = (clientX - sz / 2) + "px";
   overlay.style.top  = (clientY - sz / 2 + PIECE_VISUAL_OFFSET_Y * state.scale) + "px";
+
+  if (dragTilt) {
+    const now = performance.now();
+    if (_dragTiltLastX !== null && _dragTiltLastT !== null) {
+      const dt  = Math.max((now - _dragTiltLastT) / 1000, 0.004);
+      const raw = (clientX - _dragTiltLastX) / dt;
+      _dragTiltVX = _dragTiltVX * 0.75 + raw * 0.25;
+    }
+    _dragTiltLastX = clientX;
+    _dragTiltLastT = now;
+    _applyDragTiltAngle(overlay);
+    _startDragTiltDecay();
+  }
+}
+
+function _applyDragTiltAngle(overlay) {
+  // Moving right → negative angle (bottom lags left)
+  const angle = Math.max(-DRAG_TILT_MAX, Math.min(DRAG_TILT_MAX, -_dragTiltVX * DRAG_TILT_SCALE));
+  overlay.style.transform = `rotate(${angle.toFixed(2)}deg)`;
+}
+
+function _startDragTiltDecay() {
+  if (_dragTiltDecayRAF) return;
+  _dragTiltDecayRAF = requestAnimationFrame(function decay() {
+    if (!dragTilt || !state.pointer || !state.pointer.dragging) {
+      _dragTiltDecayRAF = null;
+      return;
+    }
+    _dragTiltVX *= 0.88;
+    const overlay = document.getElementById("drag-overlay");
+    _applyDragTiltAngle(overlay);
+    _dragTiltDecayRAF = requestAnimationFrame(decay);
+  });
 }
 
 function onPointerDown(evt) {
@@ -1135,8 +1333,10 @@ function _clearHotbarHoverZoom() {
 }
 
 function onBoardHoverLeave() {
-  const needRedraw = state.hoverCell !== null;
+  const needRedraw = state.hoverCell !== null || _hoverPreviewCell !== null;
   state.hoverCell = null;
+  _hoverPreviewCell  = null;
+  _hoverPreviewMoves = null;
   _clearBoardHoverZoom();
   if (needRedraw && (!fancyGraphics || !fancySway)) drawBoard();
 }
@@ -1214,7 +1414,13 @@ function handleDrop(ptr, clientX, clientY) {
     }
     const move = state.legalMoves.find(m => m.row === cell.row && m.col === cell.col);
     if (!move) return;
-    applyMoveOnBoard(state.board, from, cell, { recordCapture: true });
+    state.enPassant = move.twoSquare ? { row: (from.row + move.row) / 2, col: move.col } : null;
+    applyMoveOnBoard(state.board, from, cell, {
+      recordCapture: true, isEnPassant: move.isEnPassant,
+      isPush: move.isPush,
+      pushFromRow: move.pushFromRow, pushFromCol: move.pushFromCol,
+      pushToRow:   move.pushToRow,   pushToCol:   move.pushToCol,
+    });
     if (state.online.active && window.Online) Online.emitMove(from, cell);
     state.selectedSquare = null;
     state.legalMoves = [];
@@ -1254,7 +1460,13 @@ function handleBoardClick(row, col) {
     if (sel) {
       const move = state.legalMoves.find(m => m.row === row && m.col === col);
       if (move) {
-        applyMoveOnBoard(state.board, sel, { row, col }, { recordCapture: true });
+        state.enPassant = move.twoSquare ? { row: (sel.row + move.row) / 2, col: move.col } : null;
+        applyMoveOnBoard(state.board, sel, { row, col }, {
+          recordCapture: true, isEnPassant: move.isEnPassant,
+          isPush: move.isPush,
+      pushFromRow: move.pushFromRow, pushFromCol: move.pushFromCol,
+      pushToRow:   move.pushToRow,   pushToCol:   move.pushToCol,
+        });
         if (state.online.active && window.Online) Online.emitMove(sel, { row, col });
         state.selectedSquare = null;
         state.legalMoves = [];
@@ -1327,8 +1539,21 @@ function onFinishClicked() {
 
 function startPlay() {
   state.phase = PH_PLAY;
+  state.enPassant = null;
   state.selectedHotbarIdx = [null, null];
   flipToPlayer(P1, () => {
+    // If a king is already under attack before the first move, that player loses instantly
+    for (const color of [P1, P2]) {
+      if (isInCheck(state.board, color)) {
+        state.winner = 1 - color;
+        const loserName  = color  === P1 ? "Spieler 1 (Orange)" : "Spieler 2 (Blau)";
+        const winnerName = (1-color) === P1 ? "Spieler 1 (Orange)" : "Spieler 2 (Blau)";
+        showEndScreen("Sofortniederlage!", `${loserName}'s König steht sofort im Schach — ${winnerName} gewinnt!`);
+        state.phase = PH_END;
+        drawAll();
+        return;
+      }
+    }
     state.message = "Du bist am Zug.";
     drawAll();
     checkGameOver();
@@ -1340,14 +1565,29 @@ function endPlayTurn() {
   flipToPlayer(next, () => { drawAll(); checkGameOver(); });
 }
 
+function onlyKingsLeft(board) {
+  for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) {
+    const p = board[r][c];
+    if (p && p.type !== "00") return false;
+  }
+  return true;
+}
+
 function checkGameOver() {
+  // Draw: only the two kings remain
+  if (onlyKingsLeft(state.board)) {
+    showEndScreen("Remis", "Nur noch die Könige — Unentschieden.");
+    state.phase = PH_END;
+    drawAll();
+    return;
+  }
   const has = hasAnyLegalMove(state.board, state.current);
   if (!has) {
     if (isInCheck(state.board, state.current)) {
       state.winner = 1 - state.current;
       if (state.online.active) {
         const iWon = state.winner === state.online.myColor;
-        showEndScreen("Schachmatt!", iWon ? "Du gewinnst! 🎉" : `${state.online.opponentName} gewinnt!`);
+        showEndScreen("Schachmatt!", iWon ? "Du gewinnst!" : `${state.online.opponentName} gewinnt!`);
       } else {
         showEndScreen("Schachmatt!", `${state.winner === P1 ? "Spieler 1 (Orange)" : "Spieler 2 (Blau)"} gewinnt!`);
       }
@@ -1374,6 +1614,7 @@ function flipToPlayer(targetPlayer, onDone) {
   // Clear hover when transitioning — current selection / valid cells change
   state.hoverCell = null;
   hoverZoomCell = null; hoverZoomHotbarSlot = null;
+  _hoverPreviewCell = null; _hoverPreviewMoves = null;
 
   // ONLINE: each device keeps its own fixed perspective — skip the flip animation entirely
   if (state.online.active) {
@@ -1466,7 +1707,7 @@ function resetGame() {
   state.viewFlipped = false;
   state.board = createEmptyBoard();
   state.budgets = [BUDGET, BUDGET];
-  state.hotbars = [generateHotbar(), generateHotbar()];
+  state.hotbars = [loadCustomHotbar(), loadCustomHotbar()];
   state.selectedHotbarIdx = [null, null];
   state.selectedSquare = null;
   state.legalMoves = [];
@@ -1478,13 +1719,161 @@ function resetGame() {
   state.winner = null;
   state.pointer = null;
   state.hoverCell = null;
+  state.enPassant = null;
   hoverZoomProgress = 0; hoverZoomCell = null; hoverZoomHotbarSlot = null;
+  _hoverPreviewCell = null; _hoverPreviewMoves = null;
   state.captured = [[], []];
   state.online = { active: false, myColor: null, opponentName: "" };
   setDragOverlay(false, "");
   document.getElementById("end-overlay").classList.add("hidden");
   document.getElementById("disconnect-overlay").classList.add("hidden");
   drawAll();
+}
+
+// ============================================================
+// Hotbar Configuration (start-screen picker, persisted to localStorage)
+// ============================================================
+const HC_STORAGE_KEY = "tnm_hotbar_v1";
+const HC_TYPES = ["01", "02", "03", "04", "05", "10", "11"];
+const HC_NAMES = {
+  "01": "Bauer", "02": "Bischof", "03": "Pferd",
+  "04": "Turm",  "05": "Dame",   "10": "Blocker", "11": "Sumoringer",
+};
+const HC_DESCRIPTIONS = {
+  "01": "1 vor, schlägt\ndiagonal",
+  "02": "Diagonal,\nbeliebig weit",
+  "03": "L-Sprung,\nüberspringt",
+  "04": "Gerade,\nbeliebig weit",
+  "05": "Alle Richtungen,\nbeliebig weit",
+  "10": "Turm-Zug,\nunzerstörbar",
+  "11": "Turm-Zug,\nschiebt Figuren",
+};
+
+function loadCustomHotbar() {
+  try {
+    const raw = localStorage.getItem(HC_STORAGE_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr) && arr.length === 4 && arr.every(t => HC_TYPES.includes(t))) return arr;
+    }
+  } catch (_) {}
+  return ["01", "02", "03", "04"]; // sensible default
+}
+
+function saveCustomHotbar(arr) {
+  try { localStorage.setItem(HC_STORAGE_KEY, JSON.stringify(arr)); } catch (_) {}
+}
+
+function initHotbarConfig() {
+  const overlay   = document.getElementById("hotbar-config");
+  const openBtn   = document.getElementById("hotbar-config-btn");
+  const closeBtn  = document.getElementById("hc-close");
+  const randomBtn = document.getElementById("hc-random-btn");
+  const gallery   = document.getElementById("hc-gallery");
+  const slotsEl   = document.getElementById("hc-slots");
+
+  let hotbar   = loadCustomHotbar();   // working copy
+  let selected = null;                 // piece type chosen in gallery
+
+  function open() {
+    hotbar   = loadCustomHotbar();
+    selected = null;
+    render();
+    overlay.classList.remove("hidden");
+    requestAnimationFrame(() => requestAnimationFrame(() => overlay.classList.add("visible")));
+  }
+
+  function close() {
+    saveCustomHotbar(hotbar);
+    overlay.classList.remove("visible");
+    overlay.addEventListener("transitionend", () => overlay.classList.add("hidden"), { once: true });
+  }
+
+  function render() { renderGallery(); renderSlots(); }
+
+  function renderGallery() {
+    gallery.innerHTML = "";
+    for (const type of HC_TYPES) {
+      const tile = document.createElement("div");
+      tile.className = "hc-tile" + (selected === type ? " hc-selected" : "");
+
+      const img = document.createElement("img");
+      img.src = `images/figures/0${type}0.png`;
+      img.alt = HC_NAMES[type];
+
+      const name = document.createElement("div");
+      name.className = "hc-tile-name";
+      name.textContent = HC_NAMES[type];
+
+      const cost = document.createElement("div");
+      cost.className = "hc-tile-cost";
+      cost.textContent = PIECE_INFO[type].cost + " ⚙";
+
+      const desc = document.createElement("div");
+      desc.className = "hc-tile-desc";
+      desc.textContent = HC_DESCRIPTIONS[type] || "";
+
+      tile.append(img, name, cost, desc);
+      tile.addEventListener("click", () => {
+        selected = (selected === type) ? null : type;
+        renderGallery();
+        renderSlots(); // update drop-target highlights
+      });
+      gallery.appendChild(tile);
+    }
+  }
+
+  function renderSlots() {
+    slotsEl.innerHTML = "";
+    for (let i = 0; i < 4; i++) {
+      const type = hotbar[i];
+      const slot = document.createElement("div");
+      slot.className = "hc-slot" + (selected ? " hc-drop-target" : "");
+
+      const num = document.createElement("div");
+      num.className = "hc-slot-num";
+      num.textContent = "Slot " + (i + 1);
+
+      const img = document.createElement("img");
+      img.src = `images/figures/0${type}0.png`;
+      img.alt = HC_NAMES[type];
+
+      const cost = document.createElement("div");
+      cost.className = "hc-slot-cost";
+      cost.textContent = PIECE_INFO[type].cost + " ⚙";
+
+      slot.append(num, img, cost);
+      slot.addEventListener("click", () => {
+        if (selected) {
+          // Assign the selected piece to this slot
+          hotbar[i] = selected;
+          selected = null;
+          slot.classList.add("hc-bounce");
+          slot.addEventListener("animationend", () => slot.classList.remove("hc-bounce"), { once: true });
+          render();
+        } else {
+          // No piece selected → cycle through types
+          const idx = HC_TYPES.indexOf(hotbar[i]);
+          hotbar[i] = HC_TYPES[(idx + 1) % HC_TYPES.length];
+          slot.classList.add("hc-bounce");
+          slot.addEventListener("animationend", () => slot.classList.remove("hc-bounce"), { once: true });
+          renderSlots();
+        }
+      });
+      slotsEl.appendChild(slot);
+    }
+  }
+
+  openBtn.addEventListener("click", open);
+  closeBtn.addEventListener("click", close);
+  randomBtn.addEventListener("click", () => {
+    hotbar = generateHotbar();
+    selected = null;
+    render();
+  });
+
+  // Close on backdrop click
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
 }
 
 async function main() {
@@ -1500,6 +1889,9 @@ async function main() {
   hotbarCanvas.addEventListener("pointerleave", () => _clearHotbarHoverZoom());
   document.getElementById("finish-btn").addEventListener("click", onFinishClicked);
   document.getElementById("restart-btn").addEventListener("click", resetGame);
+
+  // Hotbar config
+  initHotbarConfig();
 
   // Settings panel toggle
   const settingsPanel = document.getElementById("settings-panel");
@@ -1566,6 +1958,20 @@ async function main() {
   makeFancyToggle("fancy-hover-toggle",
     () => fancyHoverZoom,
     (v) => { fancyHoverZoom = v; drawBoard(); }
+  );
+
+  // Standalone: Drag Tilt
+  makeFancyToggle("drag-tilt-toggle",
+    () => dragTilt,
+    (v) => {
+      dragTilt = v;
+      if (!v) {
+        // Reset immediately if dragging
+        _dragTiltVX = 0; _dragTiltLastX = null; _dragTiltLastT = null;
+        const ov = document.getElementById("drag-overlay");
+        ov.style.transform = "";
+      }
+    }
   );
 
   // Start screen → Play button kicks off the game
