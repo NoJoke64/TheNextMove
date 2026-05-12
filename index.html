@@ -14,6 +14,24 @@
     <div id="start-buttons">
       <button id="play-btn" type="button">Play</button>
       <button id="play-online-btn" type="button">Play Online</button>
+      <button id="hotbar-config-btn" type="button">⚙ Hotbar</button>
+    </div>
+  </div>
+
+  <!-- Hotbar configuration overlay -->
+  <div id="hotbar-config" class="hidden">
+    <div class="hc-panel">
+      <button id="hc-close" type="button" aria-label="Schließen">
+        <img src="images/red-x.png" alt="×" />
+      </button>
+      <h2 class="hc-title">Hotbar</h2>
+      <p class="hc-subtitle">Klicke eine Figur — dann einen Slot</p>
+      <div id="hc-gallery"></div>
+      <div class="hc-divider"><span>▼</span></div>
+      <div id="hc-slots"></div>
+      <div class="hc-actions">
+        <button id="hc-random-btn" type="button" class="online-secondary">Zufällig</button>
+      </div>
     </div>
   </div>
 
@@ -55,12 +73,15 @@
     </div>
   </div>
 
-  <!-- Settings panel (uses background.png) -->
+  <!-- Settings panel -->
   <div id="settings-panel" class="hidden">
-    <img class="settings-bg" src="images/background.png" alt="" />
+    <button id="settings-close" type="button" aria-label="Schließen"><img src="images/red-x.png" alt="×" /></button>
     <div class="settings-content">
-      <button id="settings-close" type="button" aria-label="Schließen"><img src="images/red-x.png" alt="×" /></button>
       <h2>Einstellungen</h2>
+      <div class="settings-row">
+        <span class="settings-label">Drag Tilt</span>
+        <img id="drag-tilt-toggle" src="images/On_Off_Button8.png" alt="toggle" />
+      </div>
       <div class="settings-row">
         <span class="settings-label">Fancy Graphics</span>
         <img id="fancy-toggle" src="images/On_Off_Button1.png" alt="toggle" />
@@ -88,7 +109,9 @@
     <!-- Sub-screen 1: name entry -->
     <div id="online-name-screen" class="online-sub">
       <div class="online-panel">
-        <img class="online-panel-bg" src="images/background.png" alt="" />
+        <button id="online-name-close" type="button" class="panel-close-btn" aria-label="Schließen">
+          <img src="images/red-x.png" alt="×" />
+        </button>
         <div class="online-panel-content">
           <h2>Online Play</h2>
           <div class="name-field-wrap">
@@ -107,7 +130,9 @@
     <!-- Sub-screen 2: lobby room -->
     <div id="online-lobby-room" class="online-sub hidden">
       <div class="online-panel">
-        <img class="online-panel-bg" src="images/background.png" alt="" />
+        <button id="online-lobby-close" type="button" class="panel-close-btn" aria-label="Schließen">
+          <img src="images/red-x.png" alt="×" />
+        </button>
         <div class="online-panel-content">
           <h2>Lobby</h2>
           <p class="online-waiting-label">Choose an opponent:</p>

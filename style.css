@@ -126,6 +126,7 @@ canvas {
   image-rendering: crisp-edges;
   z-index: 50;
   filter: drop-shadow(0 4px 0 rgba(0, 0, 0, 0.5));
+  transform-origin: 50% 25%; /* pivot im oberen Viertel */
 }
 #drag-overlay.visible { display: block; }
 
@@ -253,14 +254,18 @@ canvas {
 }
 .captured-side {
   display: flex;
-  flex-direction: column-reverse; /* fill from bottom up — first capture at bottom */
+  flex-direction: column-reverse; /* fill from bottom up */
+  flex-wrap: wrap;                /* overflow into extra columns */
   align-items: center;
-  width: 56px;
+  align-content: flex-end;        /* pack columns toward the board */
+  min-width: 56px;
   gap: 4px;
   padding: 4px 0;
   pointer-events: none;
-  overflow: hidden;
+  overflow: visible;
 }
+/* Right side: new columns grow rightward (away from board) */
+#captured-right { align-content: flex-start; }
 .captured-side img {
   width: 52px;
   height: 52px;
@@ -274,39 +279,39 @@ canvas {
   100% { transform: translateY(0) rotate(0deg);       opacity: 1; }
 }
 
-/* ========== Settings panel (uses background.png) ========== */
+/* ========== Settings panel ========== */
 #settings-panel {
   position: fixed;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
   z-index: 200;
-}
-#settings-panel.hidden { display: none; }
-#settings-panel .settings-bg {
-  display: block;
-  width: calc(169px * 3);
-  height: calc(113px * 3);
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
-  pointer-events: none;
-}
-#settings-panel .settings-content {
-  position: absolute;
-  inset: 0;
+  background: #2a1f3a;
+  border: 4px solid #ff8a3d;
+  box-shadow: 0 8px 0 #1a1422;
+  padding: 36px 40px 28px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  padding: 28px;
   font-family: 'Press Start 2P', monospace;
-  color: #f0e8d8;
 }
-#settings-panel .settings-content h2 {
+#settings-panel.hidden { display: none; }
+.settings-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  color: #f0e8d8;
+  width: 100%;
+}
+.settings-content h2 {
   font-size: 14px;
   letter-spacing: 2px;
+  margin-bottom: 4px;
 }
-#settings-close {
+
+/* Shared close-button style (settings, online panels) */
+#settings-close,
+.panel-close-btn {
   position: absolute;
   top: 10px;
   right: 10px;
@@ -316,14 +321,16 @@ canvas {
   padding: 0;
   line-height: 0;
 }
-#settings-close img {
+#settings-close img,
+.panel-close-btn img {
   width: 44px;
   height: auto;
   image-rendering: pixelated;
   display: block;
   transition: transform 0.1s ease;
 }
-#settings-close:hover img { transform: scale(1.15); }
+#settings-close:hover img,
+.panel-close-btn:hover img { transform: scale(1.15); }
 
 /* ========== Start screen: two-button layout ========== */
 #start-buttons {
@@ -332,6 +339,166 @@ canvas {
   align-items: center;
   gap: 20px;
 }
+
+#hotbar-config-btn {
+  background: transparent;
+  border: 2px solid rgba(240, 232, 216, 0.35);
+  color: #c0b8a8;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 9px;
+  padding: 10px 20px;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+#hotbar-config-btn:hover { border-color: #f0e8d8; color: #f0e8d8; }
+
+/* ========== Hotbar Config overlay ========== */
+#hotbar-config {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.82);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 320;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+#hotbar-config.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+#hotbar-config.hidden { display: none; }
+
+.hc-panel {
+  position: relative;
+  background: #2a1f3a;
+  border: 4px solid #ff8a3d;
+  box-shadow: 0 8px 0 #1a1422;
+  padding: 36px 40px 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  font-family: 'Press Start 2P', monospace;
+  min-width: 480px;
+}
+#hc-close {
+  position: absolute;
+  top: 10px; right: 10px;
+  background: none; border: none;
+  cursor: pointer; padding: 0; line-height: 0;
+}
+#hc-close img {
+  width: 44px; height: auto;
+  image-rendering: pixelated;
+  display: block;
+  transition: transform 0.1s ease;
+}
+#hc-close:hover img { transform: scale(1.15); }
+
+.hc-title {
+  font-size: 13px;
+  letter-spacing: 2px;
+  color: #ff8a3d;
+}
+.hc-subtitle {
+  font-size: 6px;
+  color: #c0b8a8;
+  letter-spacing: 1px;
+}
+
+/* Gallery — all 5 piece types to pick from */
+#hc-gallery {
+  display: flex;
+  gap: 12px;
+}
+.hc-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  cursor: pointer;
+  border: 2px solid rgba(240,232,216,0.15);
+  transition: border-color 0.12s, transform 0.12s, background 0.12s;
+}
+.hc-tile:hover { border-color: rgba(240,232,216,0.5); transform: translateY(-3px); }
+.hc-tile.hc-selected {
+  border-color: #ff8a3d;
+  background: rgba(255,138,61,0.12);
+  transform: translateY(-3px);
+}
+.hc-tile img {
+  width: 69px; height: 69px;
+  image-rendering: pixelated;
+  display: block;
+}
+.hc-tile-name {
+  font-size: 5px;
+  color: #f0e8d8;
+  letter-spacing: 1px;
+}
+.hc-tile-cost {
+  font-size: 6px;
+  color: #ffe45c;
+}
+.hc-tile-desc {
+  font-size: 5px;
+  color: #a0b8d0;
+  letter-spacing: 0.5px;
+  text-align: center;
+  line-height: 1.6;
+  max-width: 72px;
+}
+
+/* Divider arrow */
+.hc-divider {
+  font-size: 12px;
+  color: rgba(240,232,216,0.3);
+}
+
+/* Hotbar slots */
+#hc-slots {
+  display: flex;
+  gap: 16px;
+}
+.hc-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  cursor: pointer;
+  border: 2px solid rgba(240,232,216,0.25);
+  transition: border-color 0.12s, transform 0.1s;
+  min-width: 78px;
+}
+.hc-slot:hover { border-color: rgba(240,232,216,0.6); }
+.hc-slot.hc-drop-target { border-color: #ff8a3d; background: rgba(255,138,61,0.1); }
+.hc-slot img {
+  width: 69px; height: 69px;
+  image-rendering: pixelated;
+  display: block;
+}
+.hc-slot-num {
+  font-size: 6px;
+  color: rgba(240,232,216,0.4);
+}
+.hc-slot-cost {
+  font-size: 6px;
+  color: #ffe45c;
+}
+@keyframes hc-bounce {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.14); }
+  100% { transform: scale(1); }
+}
+.hc-slot.hc-bounce { animation: hc-bounce 0.18s ease-out; }
+
+.hc-actions { display: flex; gap: 12px; }
 
 #play-online-btn {
   background: #4fc3ff;
@@ -380,26 +547,23 @@ canvas {
 
 .online-panel {
   position: relative;
-  display: inline-block;
-}
-.online-panel-bg {
-  display: block;
-  width: calc(169px * 3);
-  height: calc(113px * 3);
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
-  pointer-events: none;
-}
-.online-panel-content {
-  position: absolute;
-  inset: 0;
+  background: #2a1f3a;
+  border: 4px solid #ff8a3d;
+  box-shadow: 0 8px 0 #1a1422;
+  padding: 36px 40px 28px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 28px 28px 20px;
   font-family: 'Press Start 2P', monospace;
+  min-width: 380px;
+}
+.online-panel-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   color: #f0e8d8;
   gap: 10px;
+  width: 100%;
   overflow: hidden;
 }
 .online-panel-content h2 {
@@ -672,9 +836,11 @@ canvas {
   cursor: pointer;
   flex-shrink: 0;
 }
-#fancy-toggle { width: 64px; height: auto; }
+#fancy-toggle,
+#drag-tilt-toggle { width: 64px; height: auto; }
 .fancy-sub-toggle { width: 52px; height: auto; }
 #fancy-toggle:hover,
+#drag-tilt-toggle:hover,
 .fancy-sub-toggle:hover { filter: brightness(1.15); }
 
 /* Sub-options group — visible only when Fancy Graphics is ON */
