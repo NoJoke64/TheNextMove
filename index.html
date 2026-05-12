@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <title>TheNextMove – Pixel Chess</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Start screen (shown before the first game begins) -->
+  <div id="start-screen">
+    <div id="start-buttons">
+      <button id="play-btn" type="button">Play</button>
+      <button id="play-online-btn" type="button">Play Online</button>
+    </div>
+  </div>
+
+  <div id="stage-wrapper">
+    <div id="stage">
+      <!-- Title bar sits directly above the board -->
+      <div id="status-bar">
+        <span id="phase-label">Lade…</span>
+        <span id="player-label"></span>
+        <span id="coin-label"><img src="images/coin.png" alt="coin" /><span id="coin-value">0</span></span>
+        <button id="settings-btn" type="button" aria-label="Einstellungen">
+          <img src="images/Settings.png" alt="Settings" />
+        </button>
+      </div>
+
+      <!-- Board flanked by captured-pieces graveyards -->
+      <div id="board-row">
+        <div id="captured-left" class="captured-side"></div>
+        <canvas id="board-canvas" width="188" height="196"></canvas>
+        <div id="captured-right" class="captured-side"></div>
+      </div>
+
+      <canvas id="hotbar-canvas" width="188" height="40"></canvas>
+    </div>
+  </div>
+
+  <img id="drag-overlay" alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACwAAAAAAQABAAACAkQBADs=" />
+
+  <div id="controls">
+    <button id="finish-btn">Fertig</button>
+    <span id="message"></span>
+  </div>
+
+  <div id="end-overlay" class="hidden">
+    <div id="end-box">
+      <h1 id="end-title">Schachmatt!</h1>
+      <p id="end-text"></p>
+      <button id="restart-btn">Neues Spiel</button>
+    </div>
+  </div>
+
+  <!-- Settings panel (uses background.png) -->
+  <div id="settings-panel" class="hidden">
+    <img class="settings-bg" src="images/background.png" alt="" />
+    <div class="settings-content">
+      <button id="settings-close" type="button" aria-label="Schließen"><img src="images/red-x.png" alt="×" /></button>
+      <h2>Einstellungen</h2>
+      <div class="settings-row">
+        <span class="settings-label">Fancy Graphics</span>
+        <img id="fancy-toggle" src="images/On_Off_Button1.png" alt="toggle" />
+      </div>
+      <div id="fancy-sub-options">
+        <div class="settings-row settings-sub-row">
+          <span class="settings-label">Schatten</span>
+          <img id="fancy-shadows-toggle" class="fancy-sub-toggle" src="images/On_Off_Button1.png" alt="toggle" />
+        </div>
+        <div class="settings-row settings-sub-row">
+          <span class="settings-label">Schwanken</span>
+          <img id="fancy-sway-toggle" class="fancy-sub-toggle" src="images/On_Off_Button1.png" alt="toggle" />
+        </div>
+        <div class="settings-row settings-sub-row">
+          <span class="settings-label">Hover Zoom</span>
+          <img id="fancy-hover-toggle" class="fancy-sub-toggle" src="images/On_Off_Button1.png" alt="toggle" />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Online lobby overlay ===== -->
+  <div id="online-lobby" class="hidden">
+
+    <!-- Sub-screen 1: name entry -->
+    <div id="online-name-screen" class="online-sub">
+      <div class="online-panel">
+        <img class="online-panel-bg" src="images/background.png" alt="" />
+        <div class="online-panel-content">
+          <h2>Online Play</h2>
+          <div class="name-field-wrap">
+            <img class="name-field-shadow" src="images/textfield-login-shadow.png" alt="" />
+            <img class="name-field-bg" src="images/textfield-login.png" alt="" />
+            <input id="player-name-input" type="text" maxlength="16"
+                   autocomplete="off" spellcheck="false" placeholder="YourName" />
+          </div>
+          <p id="name-error" class="online-error hidden">Name already taken!</p>
+          <button id="name-confirm-btn" type="button">Join</button>
+          <button id="name-back-btn" type="button" class="online-secondary">Back</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sub-screen 2: lobby room -->
+    <div id="online-lobby-room" class="online-sub hidden">
+      <div class="online-panel">
+        <img class="online-panel-bg" src="images/background.png" alt="" />
+        <div class="online-panel-content">
+          <h2>Lobby</h2>
+          <p class="online-waiting-label">Choose an opponent:</p>
+          <div id="lobby-player-list"></div>
+          <p id="lobby-status-msg" class="online-status"></p>
+          <button id="lobby-back-btn" type="button" class="online-secondary">Leave</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Challenge received modal -->
+  <div id="challenge-modal" class="hidden">
+    <div class="challenge-box">
+      <p id="challenge-msg"></p>
+      <div class="challenge-buttons">
+        <button id="challenge-accept-btn" type="button">Accept</button>
+        <button id="challenge-decline-btn" type="button" class="online-secondary">Decline</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Disconnect overlay -->
+  <div id="disconnect-overlay" class="hidden">
+    <div class="disconnect-box">
+      <p id="disconnect-msg">Opponent disconnected.</p>
+      <p id="disconnect-sub" class="disconnect-sub">Waiting 60s for reconnect…</p>
+      <button id="disconnect-return-btn" type="button">Return to Menu</button>
+    </div>
+  </div>
+
+  <script src="game.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="online.js"></script>
+</body>
+</html>
