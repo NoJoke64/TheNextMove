@@ -19,22 +19,91 @@ const HOTBAR_SLOT_W = CELL;  // 23 — figure size
 const BUDGET = 20;
 
 // Fancy Graphics mode — toggled via Settings panel
-// Canvas always stays at logical resolution (188×196); CSS handles the upscale.
-// In fancy mode: CSS uses bilinear upscaling (image-rendering: auto) so that
-// rotated/scaled sprites look smooth instead of blocky.
-// In normal mode: CSS uses nearest-neighbour (image-rendering: pixelated).
-let fancyGraphics  = false;
-let fancyShadows   = false;   // sub-option: drop-shadow on every piece
-let fancySway      = false;   // sub-option: pieces gently sway
-let fancyHoverZoom = false;   // sub-option: hovered pieces grow slightly
+// Board canvas renders at full native resolution (BOARD_W*scale × BOARD_H*scale).
+// All draw calls use logical coordinates; boardCtx.scale(s,s) maps them to pixels.
+// No CSS upscaling — canvas displays at its intrinsic pixel size.
+let fancyGraphics  = true;
+let fancyShadows   = true;    // sub-option: drop-shadow on every piece
+let fancySway      = true;    // sub-option: pieces gently sway
+let fancyHoverZoom = true;    // sub-option: hovered pieces grow slightly
+let fancyGlow        = true;  // sub-option: selected pieces emit additive light
+let fancyGlowMarkers = true;  // sub-sub-option: marker dots also glow
+let pixelShadows     = false; // sub-sub-option: hard pixel shadows (shadowBlur=0)
+
+// ── Blue-violet marker glow params ──────────────────────────────
+const _bvdb = {
+  coreR:  0.29,   // core gradient radius (× CELL)
+  outerR: 0.92,   // outer bloom radius (× CELL)
+  cA0:    0.83,   // core alpha: centre stop
+  cA1:    0.52,   // core alpha: 0.25 stop
+  cA2:    0.49,   // core alpha: 0.65 stop
+  oA0:    0.66,   // outer alpha: inner stop
+  oA1:    0.80,   // outer alpha: mid stop
+  // centre highlight colour (c0)
+  c0r: 205, c0g:  74, c0b:  76,
+  // hot ring colour (c1)
+  c1r: 126, c1g: 112, c1b: 115,
+  // outer-core colour (c2)
+  c2r: 194, c2g:   0, c2b:   0,
+};
 
 // ── Hover zoom animation state ───────────────────────────────
 const HOVER_ZOOM_TARGET   = 1.06;   // subtle max scale
 const HOVER_ZOOM_DURATION = 0.20;   // seconds for full in/out transition
-let hoverZoomProgress    = 0.0;    // 0.0 = normal, 1.0 = full zoom
-let hoverZoomCell        = null;   // {row, col} board piece being zoomed
+
+// Board: each cell has its own progress so pieces animate independently.
+// Key = "row,col", value = progress 0–1.
+const _boardZoomMap    = new Map();
+let   _boardZoomTarget = null;      // "row,col" of currently hovered piece (or null)
+let   _boardZoomRAFId  = null;
+
+// Hotbar: single slot at a time is fine (slots don't overlap during hover).
 let hoverZoomHotbarSlot  = null;   // 0–3 hotbar slot being zoomed
-let hoverZoomRAFId       = null;
+let _hotbarZoomProgress  = 0.0;
+let _hotbarZoomRAFId     = null;
+
+// ── Shared sprite canvas for fancy-mode piece rendering ──────
+// Pieces are pre-rendered at display resolution (CELL × scale px) with
+// nearest-neighbour, then composited onto the board canvas with bilinear
+// smoothing so that rotation/zoom transforms look anti-aliased.
+let _spriteCanvas = null;
+let _spriteCtx    = null;
+
+function _getSpriteCanvas(size) {
+  if (!_spriteCanvas) {
+    _spriteCanvas = document.createElement("canvas");
+    _spriteCtx    = _spriteCanvas.getContext("2d");
+  }
+  if (_spriteCanvas.width !== size || _spriteCanvas.height !== size) {
+    _spriteCanvas.width  = size;
+    _spriteCanvas.height = size;
+  }
+  return _spriteCtx;
+}
+
+// ── Pre-rendered marker canvases ─────────────────────────────
+// Each marker is pre-rendered at CELL*scale pixels (nearest-neighbour) so the
+// boardCtx can composite it with imageSmoothingEnabled=true for smooth shadows/glow.
+let _markerCanvas    = null;
+let _markerHitCanvas = null;
+
+function _buildMarkerCanvases() {
+  const size = Math.ceil(CELL * state.scale * _dpr());
+  function buildOne(imgKey, existing) {
+    const img = images[imgKey];
+    if (!img) return existing;
+    const cv = existing || document.createElement("canvas");
+    cv.width  = size;
+    cv.height = size;
+    const ctx = cv.getContext("2d");
+    ctx.clearRect(0, 0, size, size);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(img, 0, 0, size, size);
+    return cv;
+  }
+  _markerCanvas    = buildOne("images/marker.png",    _markerCanvas);
+  _markerHitCanvas = buildOne("images/markerHit.png", _markerHitCanvas);
+}
 
 // ── Drag-Tilt setting + state ────────────────────────────────
 let dragTilt = true;
@@ -44,6 +113,14 @@ let _dragTiltLastT    = null;
 let _dragTiltDecayRAF = null;
 const DRAG_TILT_MAX   = 16;     // degrees
 const DRAG_TILT_SCALE = 0.048;  // px/s → degrees
+
+// ── Drag canvas rendering ─────────────────────────────────────
+// Current pointer position in client (CSS-pixel) coords, updated on every move.
+let _dragClientX = 0;
+let _dragClientY = 0;
+// Full-screen overlay canvas for the dragged piece (so it isn't clipped to the board).
+let _dragCanvas = null;
+let _dragCtx    = null;
 
 // ── Hover move-preview state (PH_PLAY: faint dots where hovered piece can go) ──
 let _hoverPreviewCell  = null;   // {row, col} of the piece being previewed
@@ -72,50 +149,382 @@ function startSwayLoop() {
     if (!fancySway || !fancyGraphics) { swayRAFId = null; swayLastTime = null; return; }
     if (swayLastTime !== null) swayTime += (now - swayLastTime) / 1000;
     swayLastTime = now;
-    if (!state.animating) drawBoard();
+    if (!state.animating) { drawBoard(); drawHotbarGlow(); drawHotbar(); }
     swayRAFId = requestAnimationFrame(loop);
   });
 }
 
-function startHoverZoomLoop() {
-  if (hoverZoomRAFId !== null) return;
+// Glow is static (no pulse) — startGlowLoop kept as no-op for toggle wiring compatibility.
+function startGlowLoop() {}
+
+// Colors per player: P1 = warm amber/gold, P2 = electric cyan-blue
+function _glowColor(color) {
+  return color === 0 ? [255, 195, 55] : [55, 185, 255];
+}
+
+// Draw a static additive light corona at (cx, cy) in logical board coordinates.
+// Uses globalCompositeOperation="lighter": adds color to whatever is beneath,
+// just like a real point light source illuminating its surroundings.
+// All pieces glow subtly; kings glow a bit brighter.
+function _drawPieceGlow(ctx, cx, cy, color, isKing, dim = 1.0) {
+  const [r, g, b] = _glowColor(color);
+  const K         = (isKing ? 1.2 : 1.0) * dim;
+  const C         = CELL;
+
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur  = 0;
+
+  // ── Layer 1: Wide diffuse corona — illuminates surrounding board squares ──
+  const outerR = C * 2.4 * K;
+  const outerG = ctx.createRadialGradient(cx, cy, 0, cx, cy, outerR);
+  outerG.addColorStop(0,    `rgba(${r},${g},${b},${0.055 * K})`);
+  outerG.addColorStop(0.45, `rgba(${r},${g},${b},${0.025 * K})`);
+  outerG.addColorStop(1,    `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = outerG;
+  ctx.fillRect(cx - outerR, cy - outerR, outerR * 2, outerR * 2);
+
+  // ── Layer 2: Mid corona — bright shoulder just around the piece ──
+  const midR = C * 1.0 * K;
+  const midG = ctx.createRadialGradient(cx, cy, 0, cx, cy, midR);
+  midG.addColorStop(0,   `rgba(${r},${g},${b},${0.10 * K})`);
+  midG.addColorStop(0.5, `rgba(${r},${g},${b},${0.05 * K})`);
+  midG.addColorStop(1,   `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = midG;
+  ctx.fillRect(cx - midR, cy - midR, midR * 2, midR * 2);
+
+  // ── Layer 3: Hot white core — the piece itself is the source ──
+  const coreR = C * 0.48 * K;
+  const coreG = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR);
+  coreG.addColorStop(0,   `rgba(255,255,255,${0.14 * K})`);
+  coreG.addColorStop(0.4, `rgba(${r},${g},${b},${0.09 * K})`);
+  coreG.addColorStop(1,   `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = coreG;
+  ctx.fillRect(cx - coreR, cy - coreR, coreR * 2, coreR * 2);
+
+  // ── Layer 4: Floor reflection — flat ellipse below the piece ──
+  const fRX = C * 0.85 * K;
+  const fRY = C * 0.20 * K;
+  const fCY = cy + C * 0.56;
+  ctx.save();
+  ctx.translate(cx, fCY);
+  ctx.scale(1, fRY / fRX);
+  const floorG = ctx.createRadialGradient(0, 0, 0, 0, 0, fRX);
+  floorG.addColorStop(0,   `rgba(${r},${g},${b},${0.08 * K})`);
+  floorG.addColorStop(0.6, `rgba(${r},${g},${b},${0.03 * K})`);
+  floorG.addColorStop(1,   `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = floorG;
+  ctx.fillRect(-fRX, -fRX, fRX * 2, fRX * 2);
+  ctx.restore();
+
+  // ── Layer 5: Wide haze — soft long tail, prevents abrupt outer edge ──
+  const hazeR = C * 5.0 * K;
+  const hazeG = ctx.createRadialGradient(cx, cy, C * 1.2 * K, cx, cy, hazeR);
+  hazeG.addColorStop(0, `rgba(${r},${g},${b},${0.012 * K})`);
+  hazeG.addColorStop(1, `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = hazeG;
+  ctx.fillRect(cx - hazeR, cy - hazeR, hazeR * 2, hazeR * 2);
+
+  ctx.restore();
+}
+
+// Extra pulsing glow drawn ON TOP of the ambient glow for the selected piece.
+// Intensity is ~3× the ambient so it clearly stands out.
+function _drawSelectedPieceGlow(ctx, cx, cy, color, isKing, strength = 1) {
+  const [r, g, b] = _glowColor(color);
+  const K         = (isKing ? 1.2 : 1.0) * strength;
+  const C         = CELL;
+
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur  = 0;
+
+  // Extra corona — 0.6× the ambient alphas so total selected = 1.6× others
+  const outerR = C * 2.4 * K;
+  const outerG = ctx.createRadialGradient(cx, cy, 0, cx, cy, outerR);
+  outerG.addColorStop(0,    `rgba(${r},${g},${b},${0.033 *  K})`);
+  outerG.addColorStop(0.45, `rgba(${r},${g},${b},${0.015 *  K})`);
+  outerG.addColorStop(1,    `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = outerG;
+  ctx.fillRect(cx - outerR, cy - outerR, outerR * 2, outerR * 2);
+
+  const midR = C * 1.0 * K;
+  const midG = ctx.createRadialGradient(cx, cy, 0, cx, cy, midR);
+  midG.addColorStop(0,   `rgba(${r},${g},${b},${0.060 *  K})`);
+  midG.addColorStop(0.5, `rgba(${r},${g},${b},${0.030 *  K})`);
+  midG.addColorStop(1,   `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = midG;
+  ctx.fillRect(cx - midR, cy - midR, midR * 2, midR * 2);
+
+  const coreR = C * 0.48 * K;
+  const coreG = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR);
+  coreG.addColorStop(0,   `rgba(255,255,255,${0.084 *  K})`);
+  coreG.addColorStop(0.4, `rgba(${r},${g},${b},${0.054 *  K})`);
+  coreG.addColorStop(1,   `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = coreG;
+  ctx.fillRect(cx - coreR, cy - coreR, coreR * 2, coreR * 2);
+
+  const fRX = C * 0.85 * K;
+  const fRY = C * 0.20 * K;
+  const fCY = cy + C * 0.56;
+  ctx.save();
+  ctx.translate(cx, fCY);
+  ctx.scale(1, fRY / fRX);
+  const floorG = ctx.createRadialGradient(0, 0, 0, 0, 0, fRX);
+  floorG.addColorStop(0,   `rgba(${r},${g},${b},${0.048 *  K})`);
+  floorG.addColorStop(0.6, `rgba(${r},${g},${b},${0.018 *  K})`);
+  floorG.addColorStop(1,   `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = floorG;
+  ctx.fillRect(-fRX, -fRX, fRX * 2, fRX * 2);
+  ctx.restore();
+
+  // ── Wide haze ──
+  const hazeR = C * 5.0 * K;
+  const hazeG = ctx.createRadialGradient(cx, cy, C * 1.2 * K, cx, cy, hazeR);
+  hazeG.addColorStop(0, `rgba(${r},${g},${b},${0.010 *  K})`);
+  hazeG.addColorStop(1, `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = hazeG;
+  ctx.fillRect(cx - hazeR, cy - hazeR, hazeR * 2, hazeR * 2);
+
+  ctx.restore();
+}
+
+// Drag variant — tight bright core, very faint outer bloom.
+function _drawDragPieceGlow(ctx, cx, cy, color, isKing) {
+  const [r, g, b] = _glowColor(color);
+  const K         = isKing ? 1.2 : 1.0;
+  const C         = CELL;
+
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur  = 0;
+
+  // Outer corona — light bloom
+  const outerR = C * 2.4 * K;
+  const outerG = ctx.createRadialGradient(cx, cy, 0, cx, cy, outerR);
+  outerG.addColorStop(0,    `rgba(${r},${g},${b},${0.030 *  K})`);
+  outerG.addColorStop(0.45, `rgba(${r},${g},${b},${0.012 *  K})`);
+  outerG.addColorStop(1,    `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = outerG;
+  ctx.fillRect(cx - outerR, cy - outerR, outerR * 2, outerR * 2);
+
+  // Mid corona — reduced
+  const midR = C * 1.0 * K;
+  const midG = ctx.createRadialGradient(cx, cy, 0, cx, cy, midR);
+  midG.addColorStop(0,   `rgba(${r},${g},${b},${0.075 *  K})`);
+  midG.addColorStop(0.5, `rgba(${r},${g},${b},${0.033 *  K})`);
+  midG.addColorStop(1,   `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = midG;
+  ctx.fillRect(cx - midR, cy - midR, midR * 2, midR * 2);
+
+  // Hot white core — punchy, clearly brighter than selected
+  const coreR = C * 0.48 * K;
+  const coreG = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR);
+  coreG.addColorStop(0,   `rgba(255,255,255,${0.525 *  K})`);
+  coreG.addColorStop(0.35,`rgba(${r},${g},${b},${0.390 *  K})`);
+  coreG.addColorStop(1,   `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = coreG;
+  ctx.fillRect(cx - coreR, cy - coreR, coreR * 2, coreR * 2);
+
+  // Floor reflection — subtle
+  const fRX = C * 0.85 * K;
+  const fRY = C * 0.20 * K;
+  const fCY = cy + C * 0.56;
+  ctx.save();
+  ctx.translate(cx, fCY);
+  ctx.scale(1, fRY / fRX);
+  const floorG = ctx.createRadialGradient(0, 0, 0, 0, 0, fRX);
+  floorG.addColorStop(0,   `rgba(${r},${g},${b},${0.060 *  K})`);
+  floorG.addColorStop(0.6, `rgba(${r},${g},${b},${0.021 *  K})`);
+  floorG.addColorStop(1,   `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = floorG;
+  ctx.fillRect(-fRX, -fRX, fRX * 2, fRX * 2);
+  ctx.restore();
+
+  // Wide haze
+  const hazeR = C * 5.0 * K;
+  const hazeG = ctx.createRadialGradient(cx, cy, C * 1.2 * K, cx, cy, hazeR);
+  hazeG.addColorStop(0, `rgba(${r},${g},${b},${0.014 *  K})`);
+  hazeG.addColorStop(1, `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = hazeG;
+  ctx.fillRect(cx - hazeR, cy - hazeR, hazeR * 2, hazeR * 2);
+
+  ctx.restore();
+}
+
+
+// Marker glow — additive radial light for move dots (white) and capture dots (red).
+// cx/cy is the centre of the CELL in logical board coords.
+// pieceColor: 0 = orange piece beneath, 1 = blue piece, null = no piece
+function _drawMarkerGlow(ctx, cx, cy, isCapture, pieceColor) {
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur  = 0;
+  const C = CELL;
+
+  if (isCapture) {
+    // ── Red capture marker — shifts to blue-violet over orange pieces ──
+    const overOrange = pieceColor === 0;
+    // Core colours: red vs blue-violet (blue-violet uses _bvdb)
+    const c0 = overOrange ? `${_bvdb.c0r},${_bvdb.c0g},${_bvdb.c0b}` : "255,195,195";
+    const c1 = overOrange ? `${_bvdb.c1r},${_bvdb.c1g},${_bvdb.c1b}` : "220,  0,  0";
+    const c2 = overOrange ? `${_bvdb.c2r},${_bvdb.c2g},${_bvdb.c2b}` : "160,  0,  0";
+    const c3 = "120,  0,  0";  // edge fade
+    const o0 = "200,  0,  0";  // bloom inner
+    const o1 = "150,  0,  0";  // bloom mid
+    const o2 = "100,  0,  0";  // bloom far
+    const o3 = " 60,  0,  0";  // bloom edge
+
+    const coreR = C * (overOrange ? _bvdb.coreR : 0.92);
+    const coreG = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR);
+    coreG.addColorStop(0,    `rgba(${c0},${overOrange ? _bvdb.cA0 : 0.51})`);
+    coreG.addColorStop(0.25, `rgba(${c1},${overOrange ? _bvdb.cA1 : 0.52})`);
+    coreG.addColorStop(0.65, `rgba(${c2},${overOrange ? _bvdb.cA2 : 0.49})`);
+    coreG.addColorStop(1,    `rgba(${c3},0)`);
+    ctx.fillStyle = coreG;
+    ctx.fillRect(cx - coreR, cy - coreR, coreR * 2, coreR * 2);
+
+    const outerR = C * (overOrange ? _bvdb.outerR : 0.75);
+    const outerG = ctx.createRadialGradient(cx, cy, 0, cx, cy, outerR);
+    outerG.addColorStop(0,    `rgba(${o0},${overOrange ? _bvdb.oA0 : 0.23})`);
+    outerG.addColorStop(0.35, `rgba(${o1},${overOrange ? _bvdb.oA1 : 0.54})`);
+    outerG.addColorStop(0.70, `rgba(${o2},0)`);
+    outerG.addColorStop(1,    `rgba(${o3},0)`);
+    ctx.fillStyle = outerG;
+    ctx.fillRect(cx - outerR, cy - outerR, outerR * 2, outerR * 2);
+
+  } else {
+    // ── White move marker ────────────────────────────────────────
+    const coreR = C * 0.40;
+    const coreG = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR);
+    coreG.addColorStop(0,   "rgba(255,255,255,0.28)");
+    coreG.addColorStop(0.5, "rgba(220,210,160,0.11)");
+    coreG.addColorStop(1,   "rgba(200,190,120,0)");
+    ctx.fillStyle = coreG;
+    ctx.fillRect(cx - coreR, cy - coreR, coreR * 2, coreR * 2);
+
+    const outerR = C * 1.1;
+    const outerG = ctx.createRadialGradient(cx, cy, 0, cx, cy, outerR);
+    outerG.addColorStop(0,    "rgba(255,240,160,0.08)");
+    outerG.addColorStop(0.55, "rgba(230,210,120,0.04)");
+    outerG.addColorStop(1,    "rgba(200,180, 80,0)");
+    ctx.fillStyle = outerG;
+    ctx.fillRect(cx - outerR, cy - outerR, outerR * 2, outerR * 2);
+  }
+
+  ctx.restore();
+}
+
+// Hotbar variant — same layers but tighter
+function _drawHotbarGlow(ctx, cx, cy, color) {
+  const [r, g, b] = _glowColor(color);
+  const C         = CELL;
+
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur  = 0;
+
+  const outerR = C * 1.8;
+  const outerG = ctx.createRadialGradient(cx, cy, 0, cx, cy, outerR);
+  outerG.addColorStop(0,   `rgba(${r},${g},${b},0.45)`);
+  outerG.addColorStop(0.4, `rgba(${r},${g},${b},0.20)`);
+  outerG.addColorStop(1,   `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = outerG;
+  ctx.fillRect(cx - outerR, cy - outerR, outerR * 2, outerR * 2);
+
+  const coreR = C * 0.65;
+  const coreG = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR);
+  coreG.addColorStop(0,   `rgba(255,255,255,0.80)`);
+  coreG.addColorStop(0.35,`rgba(${r},${g},${b},0.55)`);
+  coreG.addColorStop(1,   `rgba(${r},${g},${b},0)`);
+  ctx.fillStyle = coreG;
+  ctx.fillRect(cx - coreR, cy - coreR, coreR * 2, coreR * 2);
+
+  ctx.restore();
+}
+
+// Per-cell board zoom loop — each cell animates independently.
+function _startBoardZoomLoop() {
+  if (_boardZoomRAFId !== null) return;
   let lastTime = null;
-  hoverZoomRAFId = requestAnimationFrame(function loop(now) {
+  _boardZoomRAFId = requestAnimationFrame(function loop(now) {
     if (!fancyHoverZoom || !fancyGraphics) {
-      hoverZoomProgress = 0; hoverZoomCell = null; hoverZoomHotbarSlot = null;
-      hoverZoomRAFId = null;
-      if (!state.animating) { drawBoard(); drawHotbar(); }
+      _boardZoomMap.clear(); _boardZoomTarget = null; _boardZoomRAFId = null;
+      if (!state.animating) drawBoard();
       return;
     }
-    const dt = lastTime !== null ? (now - lastTime) / 1000 : 0.016;
-    lastTime = now;
+    const dt   = lastTime !== null ? (now - lastTime) / 1000 : 0.016;
+    lastTime   = now;
     const step = dt / HOVER_ZOOM_DURATION;
-    const hasTarget = hoverZoomCell !== null || hoverZoomHotbarSlot !== null;
-    hoverZoomProgress = hasTarget
-      ? Math.min(1.0, hoverZoomProgress + step)
-      : Math.max(0.0, hoverZoomProgress - step);
-    if (!state.animating) { drawBoard(); drawHotbar(); }
-    if ((hasTarget && hoverZoomProgress < 1.0) || (!hasTarget && hoverZoomProgress > 0.0)) {
-      hoverZoomRAFId = requestAnimationFrame(loop);
+
+    // Tick every tracked cell: target → up, others → down (remove when done).
+    for (const [key, prog] of _boardZoomMap) {
+      const next = key === _boardZoomTarget
+        ? Math.min(1.0, prog + step)
+        : Math.max(0.0, prog - step);
+      if (next <= 0 && key !== _boardZoomTarget) {
+        _boardZoomMap.delete(key);
+      } else {
+        _boardZoomMap.set(key, next);
+      }
+    }
+
+    if (!state.animating) drawBoard();
+
+    // Keep running while any cell still has progress or a target exists.
+    if (_boardZoomMap.size > 0 || _boardZoomTarget !== null) {
+      _boardZoomRAFId = requestAnimationFrame(loop);
     } else {
-      hoverZoomRAFId = null;
+      _boardZoomRAFId = null;
+    }
+  });
+}
+
+// Hotbar zoom loop — single shared progress for the one hovered slot.
+function _startHotbarZoomLoop() {
+  if (_hotbarZoomRAFId !== null) return;
+  let lastTime = null;
+  _hotbarZoomRAFId = requestAnimationFrame(function loop(now) {
+    if (!fancyHoverZoom || !fancyGraphics) {
+      _hotbarZoomProgress = 0; hoverZoomHotbarSlot = null; _hotbarZoomRAFId = null;
+      if (!state.animating) drawHotbar();
+      return;
+    }
+    const dt   = lastTime !== null ? (now - lastTime) / 1000 : 0.016;
+    lastTime   = now;
+    const step = dt / HOVER_ZOOM_DURATION;
+    const hasTarget = hoverZoomHotbarSlot !== null;
+    _hotbarZoomProgress = hasTarget
+      ? Math.min(1.0, _hotbarZoomProgress + step)
+      : Math.max(0.0, _hotbarZoomProgress - step);
+    if (!state.animating) drawHotbar();
+    if ((hasTarget && _hotbarZoomProgress < 1.0) || (!hasTarget && _hotbarZoomProgress > 0.0)) {
+      _hotbarZoomRAFId = requestAnimationFrame(loop);
+    } else {
+      _hotbarZoomRAFId = null;
     }
   });
 }
 
 const PIECE_INFO = {
-  "00": { name: "König",       cost: 0, skins: 1  },
-  "01": { name: "Bauer",       cost: 1, skins: 10 },
-  "02": { name: "Bischof",     cost: 3, skins: 5  },
-  "03": { name: "Pferd",       cost: 3, skins: 2  },
-  "04": { name: "Turm",        cost: 5, skins: 1  },
-  "05": { name: "Dame",        cost: 9, skins: 6  },
-  "06": { name: "Doppelbauer", cost: 1, skins: 10 },
-  "10": { name: "Blocker",     cost: 4, skins: 1  },
-  "11": { name: "Sumoringer",  cost: 5, skins: 1  },
+  "00": { name: "King",         cost: 0, skins: 1  },
+  "01": { name: "Pawn",         cost: 1, skins: 10 },
+  "02": { name: "Bishop",       cost: 3, skins: 5  },
+  "03": { name: "Knight",       cost: 3, skins: 2  },
+  "04": { name: "Rook",         cost: 5, skins: 1  },
+  "05": { name: "Queen",        cost: 9, skins: 6  },
+  "06": { name: "Double Pawn",  cost: 1, skins: 10 },
+  "10": { name: "Blocker",      cost: 4, skins: 1  },
+  "11": { name: "Sumo Wrestler",cost: 5, skins: 1  },
+  "12": { name: "Acrobat",      cost: 3, skins: 1  },
 };
 
-const HOTBAR_TYPES = ["01", "02", "03", "04", "05", "10", "11"];
+const HOTBAR_TYPES = ["01", "02", "03", "04", "05", "10", "11", "12"];
 
 const P1 = 0, P2 = 1;
 const PH_KING_PLACE = "kingPlace";
@@ -444,6 +853,26 @@ function pseudoMoves(board, row, col, enPassant = null) {
     case "04": slide(board, row, col, p, [[1,0],[-1,0],[0,1],[0,-1]], push); break;
     case "05": slide(board, row, col, p, [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]], push); break;
 
+    // ── Akrobat ("12"): Dame-Richtungen, muss über eine Figur springen, landet dahinter
+    //    Die Plattform-Figur bleibt stehen; nur das Landefeld kann leer oder feindlich sein.
+    case "12": {
+      const dirs12 = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+      for (const [dr, dc] of dirs12) {
+        let r = row + dr, c = col + dc;
+        // Gleite über leere Felder bis zur Plattform
+        while (inBounds(r, c) && !board[r][c]) { r += dr; c += dc; }
+        if (!inBounds(r, c)) continue;          // kein Sprung möglich (Rand)
+        // board[r][c] ist die Plattform — Landeplatz ist das Feld dahinter
+        const lr = r + dr, lc = c + dc;
+        if (!inBounds(lr, lc)) continue;        // hinter der Plattform kein Platz
+        const landing = board[lr][lc];
+        if (!landing)                                                push(lr, lc, false); // leer → Zug
+        else if (landing.color !== p.color && landing.type !== "00") push(lr, lc, true);  // feindlich, kein König → Schlag
+        // eigene Figur oder König → kein Zug
+      }
+      break;
+    }
+
     // ── Blocker ("10"): Turm-Züge, kann nicht schlagen und nicht geschlagen werden
     case "10": {
       const dirs10 = [[1,0],[-1,0],[0,1],[0,-1]];
@@ -487,10 +916,10 @@ function pseudoMoves(board, row, col, enPassant = null) {
           const r2 = row + 2*dr, c2 = col + 2*dc;
           if (inBounds(r2, c2)) {
             const t2 = board[r2][c2];
-            if (!t2)                          moves.push(sumoLand(r2, c2, dr, dc, false));
-            else if (t2.color !== p.color)    moves.push(sumoLand(r2, c2, dr, dc, true));
+            if (!t2)                                              moves.push(sumoLand(r2, c2, dr, dc, false));
+            else if (t2.color !== p.color && !isBlocker(t2))     moves.push(sumoLand(r2, c2, dr, dc, true));
           }
-        } else if (t1.color !== p.color) {
+        } else if (t1.color !== p.color && !isBlocker(t1)) {
           moves.push(sumoLand(r1, c1, dr, dc, true));
         }
       }
@@ -612,12 +1041,15 @@ function hasAnyLegalMove(board, color) {
 // ============================================================
 const boardCanvas = document.getElementById("board-canvas");
 const boardCtx = boardCanvas.getContext("2d");
-const hotbarCanvas = document.getElementById("hotbar-canvas");
-const hotbarCtx = hotbarCanvas.getContext("2d");
+const hotbarCanvas     = document.getElementById("hotbar-canvas");
+const hotbarCtx        = hotbarCanvas.getContext("2d");
+const hotbarGlowCanvas = document.getElementById("hotbar-glow-canvas");
+const hotbarGlowCtx    = hotbarGlowCanvas.getContext("2d");
 
 function drawAll() {
   drawBoard();
-  drawHotbar();
+  drawHotbarGlow();  // offscreen glow buffer first
+  drawHotbar();      // pieces + composites glow on top
   drawHud();
   renderCapturedPieces();
 }
@@ -656,9 +1088,12 @@ function renderCapturedPieces() {
 }
 
 function drawBoard() {
-  // Always draw at logical resolution (188×196); CSS handles the display upscale.
+  // Draw at full native resolution (logical × scale × dpr).
+  // boardCtx.scale(s*dpr, s*dpr) maps logical coordinates to physical pixels.
+  const _s = state.scale * _dpr();
   boardCtx.setTransform(1, 0, 0, 1, 0, 0);
-  boardCtx.imageSmoothingEnabled = false; // nearest-neighbour inside the canvas
+  boardCtx.scale(_s, _s);
+  boardCtx.imageSmoothingEnabled = false; // nearest-neighbour for board + non-fancy pieces
   boardCtx.clearRect(0, 0, BOARD_W, BOARD_H);
   boardCtx.drawImage(images["images/chessBoard.png"], 0, 0);
 
@@ -680,57 +1115,105 @@ function drawBoard() {
 
       const imgX = x;
       const imgY = y + PIECE_VISUAL_OFFSET_Y;
-      const isHovered = doHoverZoom && hoverZoomCell
-        && hoverZoomCell.row === r && hoverZoomCell.col === c
-        && hoverZoomProgress > 0;
+      const _zoomProg  = doHoverZoom ? (_boardZoomMap.get(`${r},${c}`) || 0) : 0;
+      const isHovered  = _zoomProg > 0;
       const hasFancyTransform = doSway || isHovered;
 
       boardCtx.save();
 
-      // Drop-shadow on piece (canvas is always at logical scale — no S multiplier needed)
-      if (doShadows) {
-        boardCtx.shadowColor   = "rgba(0, 0, 0, 0.55)";
-        boardCtx.shadowBlur    = 4;
-        boardCtx.shadowOffsetX = 1;
-        boardCtx.shadowOffsetY = 2;
-      }
+      if (fancyGraphics) {
+        // ── Fancy path ────────────────────────────────────────────────────────
+        // 1. Pre-render at native display resolution onto the sprite canvas
+        //    with imageSmoothingEnabled = false (nearest-neighbour) so the
+        //    source pixels stay perfectly crisp.
+        const spriteSize = Math.ceil(CELL * state.scale * _dpr());
+        const sCtx = _getSpriteCanvas(spriteSize);
+        sCtx.clearRect(0, 0, spriteSize, spriteSize);
+        sCtx.imageSmoothingEnabled = false;
+        sCtx.drawImage(img, 0, 0, spriteSize, spriteSize);
 
-      if (hasFancyTransform) {
-        // Sway: rotate around the lower-quarter pivot of the figure
-        if (doSway) {
-          const pivotX = imgX + CELL / 2;
-          const pivotY = imgY + CELL * 0.75;
-          const angle  = getSwayAngle(r, c, swayTime);
-          boardCtx.translate(pivotX, pivotY);
-          boardCtx.rotate(angle);
-          boardCtx.translate(-pivotX, -pivotY);
-        }
-        // Hover zoom: ease-out scale around the figure's center
-        if (isHovered) {
-          const eased = 1 - (1 - hoverZoomProgress) * (1 - hoverZoomProgress);
-          const zoomS  = 1.0 + (HOVER_ZOOM_TARGET - 1.0) * eased;
-          const cx = imgX + CELL / 2;
-          const cy = imgY + CELL / 2;
-          boardCtx.translate(cx, cy);
-          boardCtx.scale(zoomS, zoomS);
-          boardCtx.translate(-cx, -cy);
-        }
-      }
+        // 2. Composite the sprite canvas onto the board canvas WITH smoothing so
+        //    any transforms (sway, zoom) benefit from bilinear filtering.
+        boardCtx.imageSmoothingEnabled = true;
+        boardCtx.imageSmoothingQuality = "high";
 
-      // Always nearest-neighbor — the hi-res canvas (S×) already minimises block artefacts
-      boardCtx.drawImage(img, imgX, imgY);
+        // Drop-shadow (applied during the composite draw)
+        if (doShadows) {
+          boardCtx.shadowColor   = pixelShadows ? "rgba(0,0,0,0.5)" : "rgba(0,0,0,0.96)";
+          boardCtx.shadowBlur    = pixelShadows ? 0 : 8.4;
+          boardCtx.shadowOffsetX = pixelShadows ? 0 : 2.4;
+          boardCtx.shadowOffsetY = pixelShadows ? 8 : 4.8;
+        }
+
+        if (hasFancyTransform) {
+          // Sway: rotate around the lower-quarter pivot of the figure
+          if (doSway) {
+            const pivotX = imgX + CELL / 2;
+            const pivotY = imgY + CELL * 0.75;
+            const angle  = getSwayAngle(r, c, swayTime);
+            boardCtx.translate(pivotX, pivotY);
+            boardCtx.rotate(angle);
+            boardCtx.translate(-pivotX, -pivotY);
+          }
+          // Hover zoom: ease-out scale around the figure's center
+          if (isHovered) {
+            const eased = 1 - (1 - _zoomProg) * (1 - _zoomProg);
+            const zoomS  = 1.0 + (HOVER_ZOOM_TARGET - 1.0) * eased;
+            const cx = imgX + CELL / 2;
+            const cy = imgY + CELL / 2;
+            boardCtx.translate(cx, cy);
+            boardCtx.scale(zoomS, zoomS);
+            boardCtx.translate(-cx, -cy);
+          }
+        }
+
+        // Draw the pre-rendered sprite at logical size — the board canvas CSS
+        // scale handles the final display upscale.
+        boardCtx.drawImage(_spriteCanvas, imgX, imgY, CELL, CELL);
+
+        // Restore smoothing for the rest of drawBoard (markers etc.)
+        boardCtx.imageSmoothingEnabled = false;
+
+      } else {
+        // ── Non-fancy path: nearest-neighbour direct draw ─────────────────────
+        boardCtx.drawImage(img, imgX, imgY);
+      }
 
       boardCtx.restore();
     }
   }
 
-  // Selected square outline
-  if (state.selectedSquare && state.phase === PH_PLAY) {
-    const { x, y } = cellToCanvas(state.selectedSquare.row, state.selectedSquare.col);
-    boardCtx.strokeStyle = "rgba(255, 240, 60, 0.6)";
-    boardCtx.lineWidth = 1;
-    boardCtx.strokeRect(x + 0.5, y + 0.5, CELL - 1, CELL - 1);
+  // ── Glow — every piece emits a subtle static corona ─────────────────────
+  // Drawn after all pieces so "lighter" compositing illuminates board + pieces alike.
+  if (fancyGraphics && fancyGlow) {
+    const selSq = state.selectedSquare && state.phase === PH_PLAY ? state.selectedSquare : null;
+    const ambientDim = 1.0;
+
+    const captureHighlights = new Set(
+      currentHighlights().filter(h => h.capture).map(h => `${h.row},${h.col}`)
+    );
+
+    for (let gr = 0; gr < 8; gr++) {
+      for (let gc = 0; gc < 8; gc++) {
+        const p = state.board[gr][gc];
+        if (!p) continue;
+        if (dragFrom && dragFrom.row === gr && dragFrom.col === gc) continue;
+        if (captureHighlights.has(`${gr},${gc}`)) continue;
+        const { x, y } = cellToCanvas(gr, gc);
+        _drawPieceGlow(boardCtx, x + CELL / 2, y + CELL * 0.62, p.color, p.type === "00", ambientDim);
+      }
+    }
+
+    // Selected piece: additional stronger pulsing glow on top of the ambient one
+    if (selSq) {
+      const p = state.board[selSq.row][selSq.col];
+      if (p) {
+        const { x, y } = cellToCanvas(selSq.row, selSq.col);
+        _drawSelectedPieceGlow(boardCtx, x + CELL / 2, y + CELL * 0.62, p.color, p.type === "00");
+      }
+    }
   }
+
 
   // Hover preview — projected piece on hovered valid cell (only on EMPTY squares)
   if (state.hoverCell) {
@@ -760,37 +1243,146 @@ function drawBoard() {
     boardCtx.globalAlpha = 0.30;
     boardCtx.shadowColor = "transparent";
     boardCtx.shadowBlur  = 0;
+    boardCtx.imageSmoothingEnabled = true;
+    boardCtx.imageSmoothingQuality = "high";
     for (const m of _hoverPreviewMoves) {
       const { x, y } = cellToCanvas(m.row, m.col);
-      const img = m.capture ? images["images/markerHit.png"] : images["images/marker.png"];
-      if (img) boardCtx.drawImage(img, x, y);
+      const cv = m.capture ? _markerHitCanvas : _markerCanvas;
+      if (cv) boardCtx.drawImage(cv, x, y, CELL, CELL);
     }
+    boardCtx.imageSmoothingEnabled = false;
     boardCtx.restore();
   }
 
-  // Markers ON TOP of pieces & hover preview (with colored glow drop-shadow)
+  // Markers ON TOP of pieces & hover preview
   const highlights = currentHighlights();
+  boardCtx.imageSmoothingEnabled = true;
+  boardCtx.imageSmoothingQuality = "high";
   for (const h of highlights) {
     const { x, y } = cellToCanvas(h.row, h.col);
-    const img = h.capture ? images["images/markerHit.png"] : images["images/marker.png"];
+    const cv = h.capture ? _markerHitCanvas : _markerCanvas;
+    if (!cv) continue;
+    const cx = x + CELL / 2;
+    const cy = y + CELL / 2;
     boardCtx.save();
-    if (h.capture) {
-      boardCtx.shadowColor = "rgba(0, 0, 0, 0.9)";
-      boardCtx.shadowBlur = 3;
-      boardCtx.shadowOffsetX = 0;
-      boardCtx.shadowOffsetY = 1;
-      boardCtx.drawImage(img, x, y);
-      boardCtx.shadowColor = "rgba(255, 50, 50, 1)";
-      boardCtx.shadowBlur = 8;
-      boardCtx.shadowOffsetY = 0;
-      boardCtx.drawImage(img, x, y);
-      boardCtx.drawImage(img, x, y);
-    } else {
-      boardCtx.shadowColor = "rgba(255, 230, 90, 0.9)";
-      boardCtx.shadowBlur = 4;
-      boardCtx.drawImage(img, x, y);
+    if (fancyGraphics && fancyShadows) {
+      boardCtx.shadowColor   = "rgba(0,0,0,1.0)";
+      boardCtx.shadowBlur    = 4.8;
+      boardCtx.shadowOffsetX = 1.2;
+      boardCtx.shadowOffsetY = 2.4;
     }
+    boardCtx.drawImage(cv, x, y, CELL, CELL);
     boardCtx.restore();
+    // Glow on top of the sprite
+    if (fancyGraphics && fancyGlow && fancyGlowMarkers) {
+      const _pc = state.board[h.row]?.[h.col];
+      _drawMarkerGlow(boardCtx, cx, cy, h.capture, _pc ? _pc.color : null);
+    }
+  }
+  boardCtx.imageSmoothingEnabled = false;
+
+}
+
+// ── Full-screen drag-piece canvas ─────────────────────────────────────────────
+// The dragged piece is rendered here (not on the board canvas) so it isn't
+// clipped to the board edges.  The canvas is position:fixed, covers 100vw×100vh,
+// and is transparent except for the piece + glow.
+
+function _updateDragCanvasSize() {
+  if (!_dragCanvas) return;
+  const dpr = _dpr();
+  _dragCanvas.width  = Math.round(window.innerWidth  * dpr);
+  _dragCanvas.height = Math.round(window.innerHeight * dpr);
+  _dragCanvas.style.width  = window.innerWidth  + "px";
+  _dragCanvas.style.height = window.innerHeight + "px";
+}
+
+function _clearDragCanvas() {
+  if (!_dragCtx) return;
+  _dragCtx.setTransform(1, 0, 0, 1, 0, 0);
+  _dragCtx.clearRect(0, 0, _dragCanvas.width, _dragCanvas.height);
+}
+
+function _drawDragCanvas() {
+  if (!_dragCanvas || !_dragCtx) return;
+  if (!state.pointer || !state.pointer.dragging) { _clearDragCanvas(); return; }
+
+  const dpr = _dpr();
+  const s   = state.scale;
+
+  // Apply same logical scale as the board canvas so CELL units match visually.
+  _dragCtx.setTransform(1, 0, 0, 1, 0, 0);
+  _dragCtx.clearRect(0, 0, _dragCanvas.width, _dragCanvas.height);
+  _dragCtx.scale(s * dpr, s * dpr);
+
+  // Client CSS-pixel coords → logical board-scale coords
+  const lx = _dragClientX / s;
+  const ly = _dragClientY / s;
+
+  // Resolve which piece is being dragged
+  let dragPiece = null;
+  if (state.pointer.source === "board") {
+    dragPiece = state.pointer.payload.piece;
+  } else if (state.pointer.source === "hotbar") {
+    const player = state.online.active ? state.online.myColor : state.current;
+    if (state.pointer.payload.kind === "king") {
+      dragPiece = { color: player, type: "00", skin: 0 };
+    } else if (state.pointer.payload.kind === "piece") {
+      dragPiece = { color: player, type: state.pointer.payload.type, skin: 0 };
+    }
+  }
+
+  if (!dragPiece) return;
+
+  const img  = images[pieceFile(dragPiece)];
+  const imgX = lx - CELL / 2;
+  const imgY = ly - CELL * 0.25 + PIECE_VISUAL_OFFSET_Y;  // grabbed at 25% height
+
+  if (img) {
+    _dragCtx.save();
+    _dragCtx.imageSmoothingEnabled = true;
+    _dragCtx.imageSmoothingQuality = "high";
+
+    // Drag tilt — rotate around the upper-quarter pivot
+    if (dragTilt) {
+      const angleDeg = Math.max(-DRAG_TILT_MAX,
+                       Math.min( DRAG_TILT_MAX, _dragTiltVX * DRAG_TILT_SCALE));
+      const angleRad = angleDeg * Math.PI / 180;
+      const pivotX   = lx;
+      const pivotY   = imgY + CELL * 0.25;
+      _dragCtx.translate(pivotX, pivotY);
+      _dragCtx.rotate(angleRad);
+      _dragCtx.translate(-pivotX, -pivotY);
+    }
+
+    // Drop shadow when fancy shadows are on
+    if (fancyGraphics && fancyShadows) {
+      _dragCtx.shadowColor   = pixelShadows ? "rgba(0,0,0,0.5)" : "rgba(0,0,0,1.0)";
+      _dragCtx.shadowBlur    = pixelShadows ? 0 : 12;
+      _dragCtx.shadowOffsetX = pixelShadows ? 0 : 3.6;
+      _dragCtx.shadowOffsetY = pixelShadows ? 10 : 6;
+    }
+
+    // Pre-render via sprite canvas for sharp nearest-neighbour source
+    if (fancyGraphics) {
+      const spriteSize = Math.ceil(CELL * s * dpr);
+      const sCtx = _getSpriteCanvas(spriteSize);
+      sCtx.clearRect(0, 0, spriteSize, spriteSize);
+      sCtx.imageSmoothingEnabled = false;
+      sCtx.drawImage(img, 0, 0, spriteSize, spriteSize);
+      _dragCtx.drawImage(_spriteCanvas, imgX, imgY, CELL, CELL);
+    } else {
+      _dragCtx.imageSmoothingEnabled = false;
+      _dragCtx.drawImage(img, imgX, imgY);
+    }
+
+    _dragCtx.restore();
+  }
+
+  // Glow on top — tight bright core, very faint outer bloom
+  if (fancyGraphics && fancyGlow) {
+    _drawDragPieceGlow(_dragCtx, lx, ly + CELL * 0.25 + PIECE_VISUAL_OFFSET_Y * 0.5,
+                       dragPiece.color, dragPiece.type === "00");
   }
 }
 
@@ -887,21 +1479,21 @@ function _updateBoardHoverZoom(cell) {
   if (!fancyGraphics || !fancyHoverZoom) return;
   const p = cell ? state.board[cell.row][cell.col] : null;
   const isOwn = p && p.color === _ownPlayerColor();
-  const newCell = isOwn ? cell : null;
-  const changed = (newCell === null) !== (hoverZoomCell === null)
-    || (newCell && hoverZoomCell && (newCell.row !== hoverZoomCell.row || newCell.col !== hoverZoomCell.col));
-  if (changed) {
-    hoverZoomCell = newCell;
-    hoverZoomHotbarSlot = null;
-    startHoverZoomLoop();
+  const newKey = isOwn ? `${cell.row},${cell.col}` : null;
+  if (newKey === _boardZoomTarget) return;
+  _boardZoomTarget = newKey;
+  // Ensure a new target starts from 0 so it always animates in from scratch.
+  if (newKey && !_boardZoomMap.has(newKey)) {
+    _boardZoomMap.set(newKey, 0);
   }
+  _startBoardZoomLoop();
 }
 
 function _clearBoardHoverZoom() {
   if (!fancyGraphics || !fancyHoverZoom) return;
-  if (hoverZoomCell !== null) {
-    hoverZoomCell = null;
-    startHoverZoomLoop();
+  if (_boardZoomTarget !== null) {
+    _boardZoomTarget = null;
+    _startBoardZoomLoop();
   }
 }
 
@@ -939,65 +1531,163 @@ function currentHighlights() {
 }
 
 function drawHotbar() {
-  // Hotbar fades in/out via CSS opacity transition.
-  // Online: always show YOUR OWN hotbar during the entire setup phase.
-  // Local:  visible only during SETUP (current player's turn).
   const visible = (state.phase === PH_SETUP);
-  hotbarCanvas.classList.toggle("visible", visible);
-  // When fading out, keep the last rendered content so the fade looks smooth
+  document.getElementById("hotbar-stage").classList.toggle("visible", visible);
   if (!visible) return;
 
-  // High-res internal canvas → logical coords decoupled from displayed pixel grid
-  hotbarCtx.setTransform(HOTBAR_INTERNAL_SCALE, 0, 0, HOTBAR_INTERNAL_SCALE, 0, 0);
-  hotbarCtx.imageSmoothingEnabled = false;
+  const s   = state.scale;
+  const dpr = _dpr();
+  const R   = s * dpr;          // physical pixels per logical unit (same as board)
+  hotbarCtx.setTransform(R, 0, 0, R, 0, 0);
   hotbarCtx.clearRect(0, 0, BOARD_W, HOTBAR_CANVAS_H);
 
+  // ── Background ───────────────────────────────────────────────
+  hotbarCtx.imageSmoothingEnabled = false;
+  hotbarCtx.drawImage(images["images/hotbar.png"], hotbarOriginInCanvas().x, hotbarOriginInCanvas().y);
+
   const o = hotbarOriginInCanvas();
-  hotbarCtx.drawImage(images["images/hotbar.png"], o.x, o.y);
+  const player = state.online.active ? state.online.myColor : state.current;
+  const hotbar = state.hotbars[player];
+  const draggingHotbarIdx = (state.pointer && state.pointer.dragging
+                              && state.pointer.source === "hotbar")
+                            ? state.pointer.payload.slot : -1;
 
-  if (state.phase === PH_SETUP) {
-    // Online: always draw MY hotbar. Local: draw the current player's hotbar.
-    const player = state.online.active ? state.online.myColor : state.current;
-    const hotbar = state.hotbars[player];
-    const draggingHotbarIdx = (state.pointer && state.pointer.dragging
-                               && state.pointer.source === "hotbar")
-                              ? state.pointer.payload.slot : -1;
-    for (let i = 0; i < 4; i++) {
-      const type = hotbar[i];
-      const slotX = o.x + hotbarSlotX(i);
-      const img = images[`images/figures/${player}${type}0.png`];
-      const py = o.y + (HOTBAR_H - 23) / 2 + PIECE_VISUAL_OFFSET_Y;
-      const cost = PIECE_INFO[type].cost;
-      const canAfford = state.budgets[player] >= cost;
-      const isSelected = state.selectedHotbarIdx[player] === i;
+  const doSway    = fancyGraphics && fancySway;
+  const doZoom    = fancyGraphics && fancyHoverZoom;
+  const doShadows = fancyGraphics && fancyShadows;
+  // Sprite canvas: same pipeline as board (nearest-neighbour source → smooth transform output)
+  const spriteSize = Math.ceil(CELL * s * dpr);
 
-      let alpha = canAfford ? 1.0 : 0.45;
-      if (i === draggingHotbarIdx) alpha = 0.35;
+  for (let i = 0; i < 4; i++) {
+    const type   = hotbar[i];
+    const slotX  = o.x + hotbarSlotX(i);
+    const img    = images[`images/figures/${player}${type}0.png`];
+    const py     = o.y + (HOTBAR_H - CELL) / 2 + PIECE_VISUAL_OFFSET_Y;
+    const cost   = PIECE_INFO[type].cost;
+    const canAfford  = state.budgets[player] >= cost;
+    const isSelected = state.selectedHotbarIdx[player] === i;
+    const isDragging = (i === draggingHotbarIdx);
 
-      const hotbarZooming = fancyHoverZoom && hoverZoomHotbarSlot === i && hoverZoomProgress > 0;
-      if (hotbarZooming) {
-        const eased = 1 - (1 - hoverZoomProgress) * (1 - hoverZoomProgress);
-        const zoomS  = 1.0 + (HOVER_ZOOM_TARGET - 1.0) * eased;
-        const cx = slotX + CELL / 2;
-        const cy = py + CELL / 2;
-        hotbarCtx.save();
-        hotbarCtx.translate(cx, cy);
-        hotbarCtx.scale(zoomS, zoomS);
-        hotbarCtx.translate(-cx, -cy);
-        drawHotbarFigure(hotbarCtx, img, slotX, py, isSelected, alpha);
-        hotbarCtx.restore();
-      } else {
-        drawHotbarFigure(hotbarCtx, img, slotX, py, isSelected, alpha);
+    let alpha = canAfford ? 1.0 : 0.45;
+    if (isDragging) alpha = 0.35;
+
+    const cx = slotX + CELL / 2;
+    const cy = py    + CELL / 2;
+
+    hotbarCtx.save();
+    hotbarCtx.globalAlpha = alpha;
+
+    // ── Sway ────────────────────────────────────────────────────
+    if (doSway && !isDragging) {
+      const angle    = getSwayAngle(0, i, swayTime);
+      const pivotY   = py + CELL * 0.75;
+      hotbarCtx.translate(cx, pivotY);
+      hotbarCtx.rotate(angle);
+      hotbarCtx.translate(-cx, -pivotY);
+    }
+
+    // ── Hover zoom ───────────────────────────────────────────────
+    if (doZoom && hoverZoomHotbarSlot === i && _hotbarZoomProgress > 0) {
+      const eased = 1 - (1 - _hotbarZoomProgress) * (1 - _hotbarZoomProgress);
+      const zoomS  = 1.0 + (HOVER_ZOOM_TARGET - 1.0) * eased;
+      hotbarCtx.translate(cx, cy);
+      hotbarCtx.scale(zoomS, zoomS);
+      hotbarCtx.translate(-cx, -cy);
+    }
+
+    if (img) {
+      // ── Sprite canvas (nearest-neighbour source, smooth transform output) ──
+      const sCtx = _getSpriteCanvas(spriteSize);
+      sCtx.clearRect(0, 0, spriteSize, spriteSize);
+      sCtx.imageSmoothingEnabled = false;
+      sCtx.drawImage(img, 0, 0, spriteSize, spriteSize);
+
+      hotbarCtx.imageSmoothingEnabled = true;
+      hotbarCtx.imageSmoothingQuality = "high";
+
+      // ── Drop shadow ──────────────────────────────────────────────
+      if (doShadows) {
+        if (isSelected) {
+          hotbarCtx.shadowColor   = pixelShadows ? "rgba(0,0,0,0.5)" : "rgba(0,0,0,0.96)";
+          hotbarCtx.shadowOffsetX = 0;
+          hotbarCtx.shadowOffsetY = pixelShadows ? 4 : 2.4;
+          hotbarCtx.shadowBlur    = pixelShadows ? 0 : 1.2;
+        } else {
+          hotbarCtx.shadowColor   = pixelShadows ? "rgba(0,0,0,0.3)" : "rgba(0,0,0,0.48)";
+          hotbarCtx.shadowOffsetX = 0;
+          hotbarCtx.shadowOffsetY = pixelShadows ? 3 : 1.2;
+          hotbarCtx.shadowBlur    = 0;
+        }
       }
 
-      // cost number — handcrafted 3x5 pixel digits, bottom-right of slot
-      const costColor   = canAfford ? "#ffe45c" : "#888";
-      const costShadow  = "rgba(0, 0, 0, 0.7)";
-      const slotRight   = slotX + HOTBAR_SLOT_W;
-      const slotBottom  = o.y + (HOTBAR_H - HOTBAR_BORDER) + 0; // sits inside slot
-      drawPixelNumber(hotbarCtx, cost, slotRight - 1, slotBottom - 1, costColor, costShadow);
+      // ── Selected: draw at 1.25× (on top of sway/zoom transforms) ──
+      if (isSelected) {
+        const s = 1.25;
+        hotbarCtx.translate(cx, cy);
+        hotbarCtx.scale(s, s);
+        hotbarCtx.translate(-cx, -cy);
+      }
+      hotbarCtx.drawImage(_spriteCanvas, slotX, py, CELL, CELL);
     }
+
+    hotbarCtx.restore();
+
+    // ── Cost digit ──────────────────────────────────────────────
+    const costColor  = canAfford ? "#ffe45c" : "#888";
+    const slotRight  = slotX + HOTBAR_SLOT_W;
+    const slotBottom = o.y + (HOTBAR_H - HOTBAR_BORDER);
+    drawPixelNumber(hotbarCtx, cost, slotRight - 1, slotBottom - 1, costColor, "rgba(0,0,0,0.7)");
   }
+
+  // ── Composite pre-rendered glow buffer onto piece canvas (additive, same as board) ──
+  if (fancyGraphics && fancyGlow) {
+    hotbarCtx.save();
+    hotbarCtx.setTransform(1, 0, 0, 1, 0, 0);   // identity: pixel-exact copy
+    hotbarCtx.globalCompositeOperation = "lighter";
+    hotbarCtx.drawImage(hotbarGlowCanvas, 0, 0);
+    hotbarCtx.restore();
+  }
+}
+
+function drawHotbarGlow() {
+  if (state.phase !== PH_SETUP || !fancyGraphics || !fancyGlow) {
+    hotbarGlowCtx.clearRect(0, 0, hotbarGlowCanvas.width, hotbarGlowCanvas.height);
+    return;
+  }
+
+  const R = state.scale * _dpr();
+  hotbarGlowCtx.setTransform(R, 0, 0, R, 0, 0);
+  hotbarGlowCtx.clearRect(0, 0, BOARD_W, HOTBAR_CANVAS_H);
+  hotbarGlowCtx.globalCompositeOperation = "lighter";
+
+  const o      = hotbarOriginInCanvas();
+  const player = state.online.active ? state.online.myColor : state.current;
+  const hotbar = state.hotbars[player];
+
+  for (let i = 0; i < 4; i++) {
+    const type       = hotbar[i];
+    const slotX      = o.x + hotbarSlotX(i);
+    const py         = o.y + (HOTBAR_H - CELL) / 2 + PIECE_VISUAL_OFFSET_Y;
+    const isSelected = state.selectedHotbarIdx[player] === i;
+    const canAfford  = state.budgets[player] >= PIECE_INFO[type].cost;
+    const cx         = slotX + CELL / 2;
+    const cy         = py    + CELL * 0.55;
+
+    hotbarGlowCtx.save();
+    if (isSelected) {
+      hotbarGlowCtx.globalAlpha = 0.5;
+      _drawHotbarGlow(hotbarGlowCtx, cx, cy, player);
+    } else if (canAfford) {
+      hotbarGlowCtx.globalAlpha = 0.28;
+      _drawHotbarGlow(hotbarGlowCtx, cx, cy, player);
+    }
+    hotbarGlowCtx.restore();
+  }
+
+  // Clip glow to the hotbar sprite shape — removes any bleed beyond its visible pixels
+  hotbarGlowCtx.globalCompositeOperation = "destination-in";
+  hotbarGlowCtx.drawImage(images["images/hotbar.png"], o.x, o.y);
+  hotbarGlowCtx.globalCompositeOperation = "source-over";
 }
 
 function drawHotbarFigure(ctx, img, x, y, isSelected, alpha) {
@@ -1008,10 +1698,10 @@ function drawHotbarFigure(ctx, img, x, y, isSelected, alpha) {
   ctx.save();
   ctx.globalAlpha = alpha;
   if (isSelected) {
-    ctx.shadowColor = "rgba(0, 0, 0, 0.8)";
+    ctx.shadowColor = "rgba(0, 0, 0, 0.96)";
     ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 2 * R;
-    ctx.shadowBlur = 1 * R;
+    ctx.shadowOffsetY = 2.4 * R;
+    ctx.shadowBlur = 1.2 * R;
     const cx = x + CELL / 2;
     const cy = y + CELL / 2;
     const s = 1.25;     // with R=4 → 5/4 ratio → clean 5x integer source-to-internal scaling
@@ -1020,9 +1710,9 @@ function drawHotbarFigure(ctx, img, x, y, isSelected, alpha) {
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(img, -CELL / 2, -CELL / 2);
   } else {
-    ctx.shadowColor = "rgba(0, 0, 0, 0.4)";
+    ctx.shadowColor = "rgba(0, 0, 0, 0.48)";
     ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 1 * R;
+    ctx.shadowOffsetY = 1.2 * R;
     ctx.shadowBlur = 0;
     ctx.drawImage(img, x, y);
   }
@@ -1033,18 +1723,19 @@ function drawHud() {
   const phaseLabel = document.getElementById("phase-label");
   const playerLabel = document.getElementById("player-label");
   const coinValue = document.getElementById("coin-value");
-  const finishBtn = document.getElementById("finish-btn");
-  const messageEl = document.getElementById("message");
-  const coinLabel = document.getElementById("coin-label");
+  const finishBtn  = document.getElementById("finish-btn");
+  const resignBtn  = document.getElementById("resign-btn");
+  const messageEl  = document.getElementById("message");
+  const coinLabel  = document.getElementById("coin-label");
 
   phaseLabel.textContent = ({
-    [PH_KING_PLACE]: "König setzen",
-    [PH_SETUP]:      "Aufstellung",
-    [PH_PLAY]:       "Spiel läuft",
-    [PH_END]:        "Ende",
+    [PH_KING_PLACE]: "Place King",
+    [PH_SETUP]:      "Setup",
+    [PH_PLAY]:       "Playing",
+    [PH_END]:        "Game Over",
   })[state.phase];
 
-  playerLabel.textContent = state.current === P1 ? "P1 Orange" : "P2 Blau";
+  playerLabel.textContent = state.current === P1 ? "P1 Orange" : "P2 Blue";
   playerLabel.className = state.current === P1 ? "p1" : "p2";
 
   // Online: always show MY budget. Local: show current player's budget.
@@ -1055,10 +1746,17 @@ function drawHud() {
 
   if (state.phase === PH_SETUP) {
     finishBtn.classList.remove("hidden");
-    finishBtn.textContent = state.setupDone[state.current] ? "Wartet…" : "Fertig";
+    finishBtn.textContent = state.setupDone[state.current] ? "Waiting…" : "Done";
     finishBtn.disabled = state.setupDone[state.current];
   } else {
     finishBtn.classList.add("hidden");
+  }
+
+  // "Aufgeben" nur während laufendem Spiel sichtbar
+  if (state.phase === PH_PLAY) {
+    resignBtn.classList.remove("hidden");
+  } else {
+    resignBtn.classList.add("hidden");
   }
 
   // ONLINE: override message when waiting for opponent's turn
@@ -1069,7 +1767,7 @@ function drawHud() {
 
   // Auto-message hints
   if (state.phase === PH_KING_PLACE && !state.message) {
-    messageEl.textContent = "Klicke ein Feld in deiner Grundreihe, um den König zu setzen.";
+    messageEl.textContent = "Click a square in your back rank to place the King.";
   } else {
     messageEl.textContent = state.message;
   }
@@ -1078,10 +1776,24 @@ function drawHud() {
 // ============================================================
 // Scaling
 // ============================================================
+
+// Returns the current device pixel ratio (≥1; 2 on Retina/HiDPI displays).
+function _dpr() { return window.devicePixelRatio || 1; }
+
 function applyBoardCanvasMode() {
-  boardCanvas.width  = BOARD_W;
-  boardCanvas.height = BOARD_H;
-  boardCanvas.style.imageRendering = ""; // always let CSS pixelated rule apply
+  const s   = state.scale;
+  const dpr = _dpr();
+  // Board canvas: physical size = logical × scale × dpr  →  pixel-perfect on HiDPI.
+  boardCanvas.width  = Math.round(BOARD_W * s * dpr);
+  boardCanvas.height = Math.round(BOARD_H * s * dpr);
+  boardCanvas.style.width  = (BOARD_W * s) + "px";
+  boardCanvas.style.height = (BOARD_H * s) + "px";
+  // Hotbar canvases: same DPR-aware sizing.
+  const hw = Math.round(BOARD_W       * s * dpr);
+  const hh = Math.round(HOTBAR_CANVAS_H * s * dpr);
+  hotbarCanvas.width      = hw;  hotbarCanvas.height      = hh;
+  hotbarGlowCanvas.width  = hw;  hotbarGlowCanvas.height  = hh;
+  _buildMarkerCanvases();
 }
 
 function updateScale() {
@@ -1094,7 +1806,7 @@ function updateScale() {
   const scaleW = availW / BOARD_W;
   const scaleH = availH / totalH;
   let s = Math.min(scaleW, scaleH);
-  if (!fancyGraphics) s = Math.floor(s); // integer steps look cleanest with pixelated CSS
+  if (!fancyGraphics) s = Math.floor(s); // integer steps keep pixel art grid-aligned
   if (s < 1) s = 1;
   if (s > 8) s = 8;
   state.scale = s;
@@ -1122,27 +1834,17 @@ function getCanvasNativePos(canvas, clientX, clientY) {
 const TRANSPARENT_PIXEL = "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACwAAAAAAQABAAACAkQBADs=";
 
 function setDragOverlay(visible, imgSrc) {
-  const overlay = document.getElementById("drag-overlay");
-  if (visible && imgSrc) {
-    overlay.src = imgSrc;
-    const sz = state.scale * CELL;
-    overlay.style.width = sz + "px";
-    overlay.style.height = sz + "px";
-    overlay.classList.add("visible");
-  } else {
-    overlay.classList.remove("visible");
-    overlay.src = TRANSPARENT_PIXEL;
-    // Reset tilt state
+  // DOM overlay is not used — piece is drawn on the full-screen drag canvas.
+  if (!visible) {
     _dragTiltVX = 0; _dragTiltLastX = null; _dragTiltLastT = null;
-    overlay.style.transform = "";
+    _clearDragCanvas();
+    drawBoard();
   }
 }
 
 function moveDragOverlay(clientX, clientY) {
-  const overlay = document.getElementById("drag-overlay");
-  const sz = state.scale * CELL;
-  overlay.style.left = (clientX - sz / 2) + "px";
-  overlay.style.top  = (clientY - sz / 2 + PIECE_VISUAL_OFFSET_Y * state.scale) + "px";
+  _dragClientX = clientX;
+  _dragClientY = clientY;
 
   if (dragTilt) {
     const now = performance.now();
@@ -1153,15 +1855,10 @@ function moveDragOverlay(clientX, clientY) {
     }
     _dragTiltLastX = clientX;
     _dragTiltLastT = now;
-    _applyDragTiltAngle(overlay);
     _startDragTiltDecay();
   }
-}
 
-function _applyDragTiltAngle(overlay) {
-  // Moving right → negative angle (bottom lags left)
-  const angle = Math.max(-DRAG_TILT_MAX, Math.min(DRAG_TILT_MAX, -_dragTiltVX * DRAG_TILT_SCALE));
-  overlay.style.transform = `rotate(${angle.toFixed(2)}deg)`;
+  if (!state.animating) { drawBoard(); _drawDragCanvas(); }
 }
 
 function _startDragTiltDecay() {
@@ -1172,8 +1869,7 @@ function _startDragTiltDecay() {
       return;
     }
     _dragTiltVX *= 0.88;
-    const overlay = document.getElementById("drag-overlay");
-    _applyDragTiltAngle(overlay);
+    if (!state.animating) { drawBoard(); _drawDragCanvas(); }
     _dragTiltDecayRAF = requestAnimationFrame(decay);
   });
 }
@@ -1320,15 +2016,14 @@ function onHotbarHoverMove(evt) {
   const slot = hotbarPxToSlot(pos.x, pos.y);
   if (hoverZoomHotbarSlot !== slot) {
     hoverZoomHotbarSlot = slot;
-    hoverZoomCell = null;
-    startHoverZoomLoop();
+    _startHotbarZoomLoop();
   }
 }
 
 function _clearHotbarHoverZoom() {
   if (hoverZoomHotbarSlot !== null) {
     hoverZoomHotbarSlot = null;
-    startHoverZoomLoop();
+    _startHotbarZoomLoop();
   }
 }
 
@@ -1546,9 +2241,9 @@ function startPlay() {
     for (const color of [P1, P2]) {
       if (isInCheck(state.board, color)) {
         state.winner = 1 - color;
-        const loserName  = color  === P1 ? "Spieler 1 (Orange)" : "Spieler 2 (Blau)";
-        const winnerName = (1-color) === P1 ? "Spieler 1 (Orange)" : "Spieler 2 (Blau)";
-        showEndScreen("Sofortniederlage!", `${loserName}'s König steht sofort im Schach — ${winnerName} gewinnt!`);
+        const loserName  = color  === P1 ? "Player 1 (Orange)" : "Player 2 (Blue)";
+        const winnerName = (1-color) === P1 ? "Player 1 (Orange)" : "Player 2 (Blue)";
+        showEndScreen("Instant Loss!", `${loserName}'s King is immediately in check — ${winnerName} wins!`);
         state.phase = PH_END;
         drawAll();
         return;
@@ -1576,7 +2271,7 @@ function onlyKingsLeft(board) {
 function checkGameOver() {
   // Draw: only the two kings remain
   if (onlyKingsLeft(state.board)) {
-    showEndScreen("Remis", "Nur noch die Könige — Unentschieden.");
+    showEndScreen("Draw", "Only Kings remain — it's a draw.");
     state.phase = PH_END;
     drawAll();
     return;
@@ -1587,12 +2282,12 @@ function checkGameOver() {
       state.winner = 1 - state.current;
       if (state.online.active) {
         const iWon = state.winner === state.online.myColor;
-        showEndScreen("Schachmatt!", iWon ? "Du gewinnst!" : `${state.online.opponentName} gewinnt!`);
+        showEndScreen("Checkmate!", iWon ? "You win!" : `${state.online.opponentName} wins!`);
       } else {
-        showEndScreen("Schachmatt!", `${state.winner === P1 ? "Spieler 1 (Orange)" : "Spieler 2 (Blau)"} gewinnt!`);
+        showEndScreen("Checkmate!", `${state.winner === P1 ? "Player 1 (Orange)" : "Player 2 (Blue)"} wins!`);
       }
     } else {
-      showEndScreen("Patt", "Unentschieden — kein gültiger Zug.");
+      showEndScreen("Stalemate", "Draw — no legal moves.");
     }
     state.phase = PH_END;
     drawAll();
@@ -1613,7 +2308,7 @@ function easeInOutQuad(t) { return t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2; 
 function flipToPlayer(targetPlayer, onDone) {
   // Clear hover when transitioning — current selection / valid cells change
   state.hoverCell = null;
-  hoverZoomCell = null; hoverZoomHotbarSlot = null;
+  _boardZoomMap.clear(); _boardZoomTarget = null; hoverZoomHotbarSlot = null;
   _hoverPreviewCell = null; _hoverPreviewMoves = null;
 
   // ONLINE: each device keeps its own fixed perspective — skip the flip animation entirely
@@ -1665,7 +2360,9 @@ function flipAnimFrame(now) {
   if (t > 1) t = 1;
   const e = easeInOutQuad(t);
 
+  const _s = state.scale * _dpr();
   boardCtx.setTransform(1, 0, 0, 1, 0, 0);
+  boardCtx.scale(_s, _s);
   boardCtx.imageSmoothingEnabled = false;
   boardCtx.clearRect(0, 0, BOARD_W, BOARD_H);
   boardCtx.drawImage(images["images/chessBoard.png"], 0, 0);
@@ -1675,6 +2372,14 @@ function flipAnimFrame(now) {
     const y = item.from.y + (item.to.y - item.from.y) * e;
     const img = images[pieceFile(item.p)];
     if (img) boardCtx.drawImage(img, Math.round(x), Math.round(y));
+  }
+
+  if (fancyGraphics && fancyGlow) {
+    for (const item of a.pieces) {
+      const x = item.from.x + (item.to.x - item.from.x) * e;
+      const y = item.from.y + (item.to.y - item.from.y) * e;
+      _drawPieceGlow(boardCtx, x + CELL / 2, y + CELL * 0.62, item.p.color, item.p.type === "00");
+    }
   }
 
   if (t < 1) {
@@ -1720,33 +2425,65 @@ function resetGame() {
   state.pointer = null;
   state.hoverCell = null;
   state.enPassant = null;
-  hoverZoomProgress = 0; hoverZoomCell = null; hoverZoomHotbarSlot = null;
+  _boardZoomMap.clear(); _boardZoomTarget = null;
+  _hotbarZoomProgress = 0; hoverZoomHotbarSlot = null;
   _hoverPreviewCell = null; _hoverPreviewMoves = null;
   state.captured = [[], []];
   state.online = { active: false, myColor: null, opponentName: "" };
   setDragOverlay(false, "");
   document.getElementById("end-overlay").classList.add("hidden");
   document.getElementById("disconnect-overlay").classList.add("hidden");
+  document.getElementById("resign-modal").classList.add("hidden");
   drawAll();
 }
 
 // ============================================================
+// ── Settings persistence ─────────────────────────────────────
+const SETTINGS_STORAGE_KEY = "tnm_settings_v1";
+
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) return;
+    const s = JSON.parse(raw);
+    if (typeof s.dragTilt        === "boolean") dragTilt        = s.dragTilt;
+    if (typeof s.fancyGraphics   === "boolean") fancyGraphics   = s.fancyGraphics;
+    if (typeof s.fancyShadows    === "boolean") fancyShadows    = s.fancyShadows;
+    if (typeof s.fancySway       === "boolean") fancySway       = s.fancySway;
+    if (typeof s.fancyHoverZoom  === "boolean") fancyHoverZoom  = s.fancyHoverZoom;
+    if (typeof s.fancyGlow       === "boolean") fancyGlow       = s.fancyGlow;
+    if (typeof s.fancyGlowMarkers=== "boolean") fancyGlowMarkers= s.fancyGlowMarkers;
+    if (typeof s.pixelShadows    === "boolean") pixelShadows    = s.pixelShadows;
+  } catch (_) {}
+}
+
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
+      dragTilt, fancyGraphics, fancyShadows, fancySway,
+      fancyHoverZoom, fancyGlow, fancyGlowMarkers, pixelShadows,
+    }));
+  } catch (_) {}
+}
+
 // Hotbar Configuration (start-screen picker, persisted to localStorage)
 // ============================================================
 const HC_STORAGE_KEY = "tnm_hotbar_v1";
-const HC_TYPES = ["01", "02", "03", "04", "05", "10", "11"];
+const HC_TYPES = ["01", "02", "03", "04", "05", "10", "11", "12"];
 const HC_NAMES = {
-  "01": "Bauer", "02": "Bischof", "03": "Pferd",
-  "04": "Turm",  "05": "Dame",   "10": "Blocker", "11": "Sumoringer",
+  "01": "Pawn", "02": "Bishop", "03": "Knight",
+  "04": "Rook", "05": "Queen",  "10": "Blocker", "11": "Sumo Wrestler",
+  "12": "Acrobat",
 };
 const HC_DESCRIPTIONS = {
-  "01": "1 vor, schlägt\ndiagonal",
-  "02": "Diagonal,\nbeliebig weit",
-  "03": "L-Sprung,\nüberspringt",
-  "04": "Gerade,\nbeliebig weit",
-  "05": "Alle Richtungen,\nbeliebig weit",
-  "10": "Turm-Zug,\nunzerstörbar",
-  "11": "Turm-Zug,\nschiebt Figuren",
+  "01": "1 forward,\ncaptures diagonal",
+  "02": "Diagonal,\nany distance",
+  "03": "L-jump,\nleaps over",
+  "04": "Straight,\nany distance",
+  "05": "All directions,\nany distance",
+  "10": "Rook move,\nindestructible",
+  "11": "Rook move,\npushes pieces",
+  "12": "Queen move,\njumps over piece",
 };
 
 function loadCustomHotbar() {
@@ -1878,9 +2615,7 @@ function initHotbarConfig() {
 
 async function main() {
   await preload();
-  // Bump hotbar canvas internal resolution (logical 188x40 → 4x)
-  hotbarCanvas.width = BOARD_W * HOTBAR_INTERNAL_SCALE;
-  hotbarCanvas.height = HOTBAR_CANVAS_H * HOTBAR_INTERNAL_SCALE;
+  // Canvas sizes are set by applyBoardCanvasMode() → called via updateScale() below.
   boardCanvas.addEventListener("pointerdown", onPointerDown);
   hotbarCanvas.addEventListener("pointerdown", onPointerDown);
   boardCanvas.addEventListener("pointermove", onBoardHoverMove);
@@ -1889,6 +2624,35 @@ async function main() {
   hotbarCanvas.addEventListener("pointerleave", () => _clearHotbarHoverZoom());
   document.getElementById("finish-btn").addEventListener("click", onFinishClicked);
   document.getElementById("restart-btn").addEventListener("click", resetGame);
+
+  const resignModal   = document.getElementById("resign-modal");
+  const resignConfirm = document.getElementById("resign-confirm-btn");
+  const resignCancel  = document.getElementById("resign-cancel-btn");
+
+  document.getElementById("resign-btn").addEventListener("click", () => {
+    if (state.phase !== PH_PLAY) return;
+    resignModal.classList.remove("hidden");
+  });
+
+  resignCancel.addEventListener("click", () => {
+    resignModal.classList.add("hidden");
+  });
+
+  resignConfirm.addEventListener("click", () => {
+    resignModal.classList.add("hidden");
+    if (state.phase !== PH_PLAY) return;
+    if (state.online.active) {
+      if (window.Online && Online.emitResign) Online.emitResign();
+    } else {
+      const loser      = state.current;
+      const winner     = 1 - loser;
+      const loserName  = loser  === P1 ? "Player 1 (Orange)" : "Player 2 (Blue)";
+      const winnerName = winner === P1 ? "Player 1 (Orange)" : "Player 2 (Blue)";
+      state.phase = PH_END;
+      drawAll();
+      showEndScreen("Resignation!", `${loserName} resigns — ${winnerName} wins!`);
+    }
+  });
 
   // Hotbar config
   initHotbarConfig();
@@ -1903,6 +2667,8 @@ async function main() {
   });
 
   // ── Fancy Graphics toggles ───────────────────────────────
+  loadSettings();   // restore persisted values before wiring toggles
+
   const FANCY_FRAMES = 8;
   const FANCY_FPS    = 36;
   const fancySubGroup = document.getElementById("fancy-sub-options");
@@ -1910,6 +2676,9 @@ async function main() {
   // Generic helper: wire an On/Off toggle image to a getter/setter pair
   function makeFancyToggle(elemId, getValue, setValue) {
     const el = document.getElementById(elemId);
+    // Apply initial visual state from loaded/default value
+    el.classList.toggle("toggle-on", getValue());
+    el.src = `images/On_Off_Button${getValue() ? 8 : 1}.png`;
     let animating = false;
     el.addEventListener("click", () => {
       if (animating) return;
@@ -1925,51 +2694,90 @@ async function main() {
         if (frame === lastFrame) {
           clearInterval(iv);
           setValue(forward);
+          el.classList.toggle("toggle-on", forward);
           animating = false;
         }
       }, 1000 / FANCY_FPS);
     });
   }
 
+  // Sub-options: reflect actual startup state
+  fancySubGroup.classList.toggle("fancy-disabled", !fancyGraphics);
+
   // Main Fancy Graphics toggle
   makeFancyToggle("fancy-toggle",
     () => fancyGraphics,
     (v) => {
       fancyGraphics = v;
-      fancySubGroup.classList.toggle("visible", v);
+      fancySubGroup.classList.toggle("fancy-disabled", !v);
+      saveSettings();
       updateScale();   // decimal ↔ integer zoom + canvas resize
       drawAll();
     }
   );
 
-  // Sub-option: Schatten
+  // Sub-option: Shadows
+  const shadowsSubOptions = document.getElementById("fancy-shadows-sub-options");
   makeFancyToggle("fancy-shadows-toggle",
     () => fancyShadows,
-    (v) => { fancyShadows = v; drawBoard(); }
+    (v) => {
+      fancyShadows = v;
+      shadowsSubOptions.classList.toggle("fancy-disabled", !v);
+      saveSettings(); drawBoard(); drawHotbar();
+    }
+  );
+  makeFancyToggle("fancy-pixel-shadows-toggle",
+    () => pixelShadows,
+    (v) => { pixelShadows = v; saveSettings(); drawBoard(); drawHotbar(); }
   );
 
   // Sub-option: Schwanken
   makeFancyToggle("fancy-sway-toggle",
     () => fancySway,
-    (v) => { fancySway = v; if (v) startSwayLoop(); else drawBoard(); }
+    (v) => {
+      fancySway = v;
+      saveSettings();
+      if (v) startSwayLoop();
+      else { drawBoard(); if (fancyGlow && fancyGraphics) startGlowLoop(); }
+    }
   );
 
   // Sub-option: Hover Zoom
   makeFancyToggle("fancy-hover-toggle",
     () => fancyHoverZoom,
-    (v) => { fancyHoverZoom = v; drawBoard(); }
+    (v) => { fancyHoverZoom = v; saveSettings(); drawBoard(); }
   );
+
+  // Sub-option: Glühen
+  const glowSubOptions = document.getElementById("fancy-glow-sub-options");
+  makeFancyToggle("fancy-glow-toggle",
+    () => fancyGlow,
+    (v) => {
+      fancyGlow = v;
+      glowSubOptions.classList.toggle("fancy-disabled", !v);
+      saveSettings();
+      if (v) startGlowLoop(); else { drawBoard(); drawHotbarGlow(); drawHotbar(); }
+    }
+  );
+  makeFancyToggle("fancy-glow-markers-toggle",
+    () => fancyGlowMarkers,
+    (v) => { fancyGlowMarkers = v; saveSettings(); drawBoard(); }
+  );
+
+  // Apply initial loop/disabled states based on startup values
+  shadowsSubOptions.classList.toggle("fancy-disabled", !fancyShadows);
+  glowSubOptions.classList.toggle("fancy-disabled", !fancyGlow);
+  if (fancyGraphics && fancySway) startSwayLoop();
 
   // Standalone: Drag Tilt
   makeFancyToggle("drag-tilt-toggle",
     () => dragTilt,
     (v) => {
       dragTilt = v;
+      saveSettings();
       if (!v) {
-        // Reset immediately if dragging
         _dragTiltVX = 0; _dragTiltLastX = null; _dragTiltLastT = null;
-        const ov = document.getElementById("drag-overlay");
-        ov.style.transform = "";
+        if (!state.animating) drawBoard();
       }
     }
   );
@@ -2000,11 +2808,36 @@ async function main() {
       });
     }, { once: true });
   });
-  window.addEventListener("resize", () => { updateScale(); drawAll(); });
+  // ── Full-screen drag canvas ──────────────────────────────────
+  _dragCanvas = document.createElement("canvas");
+  Object.assign(_dragCanvas.style, {
+    position: "fixed", top: "0", left: "0",
+    pointerEvents: "none", zIndex: "999",
+    imageRendering: "pixelated",
+  });
+  document.body.appendChild(_dragCanvas);
+  _dragCtx = _dragCanvas.getContext("2d");
+  _updateDragCanvasSize();
+
+  window.addEventListener("resize", () => { updateScale(); _updateDragCanvasSize(); drawAll(); });
   // Prevent default touch behaviors over canvases
   for (const el of [boardCanvas, hotbarCanvas]) {
     el.addEventListener("touchstart", e => e.preventDefault(), { passive: false });
   }
+  // Log device pixel ratio so HiDPI/Retina scaling is visible in the console
+  function _logDpr() {
+    const dpr = _dpr();
+    console.log(`[TheNextMove] devicePixelRatio = ${dpr}` +
+      (dpr !== 1 ? ` — HiDPI display (${dpr}× physical pixels per CSS pixel, canvas upscaled accordingly)` : " — standard display"));
+  }
+  _logDpr();
+  // Re-log + rebuild if the window moves to a display with a different DPR
+  window.matchMedia(`(resolution: ${_dpr()}dppx)`).addEventListener("change", () => {
+    _logDpr();
+    updateScale();
+    drawAll();
+  });
+
   updateScale();
   // Don't start the game automatically — wait for the player to press Play
   // (the #start-screen overlay covers everything until then)

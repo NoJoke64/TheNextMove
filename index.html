@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <title>TheNextMove – Pixel Chess</title>
@@ -21,16 +21,16 @@
   <!-- Hotbar configuration overlay -->
   <div id="hotbar-config" class="hidden">
     <div class="hc-panel">
-      <button id="hc-close" type="button" aria-label="Schließen">
+      <button id="hc-close" type="button" aria-label="Close">
         <img src="images/red-x.png" alt="×" />
       </button>
       <h2 class="hc-title">Hotbar</h2>
-      <p class="hc-subtitle">Klicke eine Figur — dann einen Slot</p>
+      <p class="hc-subtitle">Click a piece — then a slot</p>
       <div id="hc-gallery"></div>
       <div class="hc-divider"><span>▼</span></div>
       <div id="hc-slots"></div>
       <div class="hc-actions">
-        <button id="hc-random-btn" type="button" class="online-secondary">Zufällig</button>
+        <button id="hc-random-btn" type="button" class="online-secondary">Random</button>
       </div>
     </div>
   </div>
@@ -39,10 +39,10 @@
     <div id="stage">
       <!-- Title bar sits directly above the board -->
       <div id="status-bar">
-        <span id="phase-label">Lade…</span>
+        <span id="phase-label">Loading…</span>
         <span id="player-label"></span>
         <span id="coin-label"><img src="images/coin.png" alt="coin" /><span id="coin-value">0</span></span>
-        <button id="settings-btn" type="button" aria-label="Einstellungen">
+        <button id="settings-btn" type="button" aria-label="Settings">
           <img src="images/Settings.png" alt="Settings" />
         </button>
       </div>
@@ -54,50 +54,70 @@
         <div id="captured-right" class="captured-side"></div>
       </div>
 
-      <canvas id="hotbar-canvas" width="188" height="40"></canvas>
+      <div id="hotbar-stage">
+        <canvas id="hotbar-canvas"      width="188" height="40"></canvas>
+        <canvas id="hotbar-glow-canvas" width="188" height="40"></canvas>
+      </div>
     </div>
   </div>
 
   <img id="drag-overlay" alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACwAAAAAAQABAAACAkQBADs=" />
 
   <div id="controls">
-    <button id="finish-btn">Fertig</button>
+    <button id="finish-btn">Done</button>
     <span id="message"></span>
+    <button id="resign-btn" class="hidden">Resign</button>
   </div>
 
   <div id="end-overlay" class="hidden">
     <div id="end-box">
-      <h1 id="end-title">Schachmatt!</h1>
+      <h1 id="end-title">Checkmate!</h1>
       <p id="end-text"></p>
-      <button id="restart-btn">Neues Spiel</button>
+      <button id="restart-btn">New Game</button>
     </div>
   </div>
 
   <!-- Settings panel -->
   <div id="settings-panel" class="hidden">
-    <button id="settings-close" type="button" aria-label="Schließen"><img src="images/red-x.png" alt="×" /></button>
+    <button id="settings-close" type="button" aria-label="Close"><img src="images/red-x.png" alt="×" /></button>
     <div class="settings-content">
-      <h2>Einstellungen</h2>
+      <h2>Settings</h2>
       <div class="settings-row">
         <span class="settings-label">Drag Tilt</span>
         <img id="drag-tilt-toggle" src="images/On_Off_Button8.png" alt="toggle" />
       </div>
       <div class="settings-row">
         <span class="settings-label">Fancy Graphics</span>
-        <img id="fancy-toggle" src="images/On_Off_Button1.png" alt="toggle" />
+        <img id="fancy-toggle" src="images/On_Off_Button8.png" alt="toggle" />
       </div>
       <div id="fancy-sub-options">
         <div class="settings-row settings-sub-row">
-          <span class="settings-label">Schatten</span>
-          <img id="fancy-shadows-toggle" class="fancy-sub-toggle" src="images/On_Off_Button1.png" alt="toggle" />
+          <span class="settings-label">Shadows</span>
+          <img id="fancy-shadows-toggle" class="fancy-sub-toggle" src="images/On_Off_Button8.png" alt="toggle" />
+        </div>
+        <div id="fancy-shadows-sub-options">
+          <div class="settings-row settings-sub-row settings-subsub-row">
+            <span class="settings-label">Pixel Style</span>
+            <img id="fancy-pixel-shadows-toggle" class="fancy-sub-toggle" src="images/On_Off_Button1.png" alt="toggle" />
+          </div>
         </div>
         <div class="settings-row settings-sub-row">
-          <span class="settings-label">Schwanken</span>
-          <img id="fancy-sway-toggle" class="fancy-sub-toggle" src="images/On_Off_Button1.png" alt="toggle" />
+          <span class="settings-label">Sway</span>
+          <img id="fancy-sway-toggle" class="fancy-sub-toggle" src="images/On_Off_Button8.png" alt="toggle" />
         </div>
         <div class="settings-row settings-sub-row">
           <span class="settings-label">Hover Zoom</span>
-          <img id="fancy-hover-toggle" class="fancy-sub-toggle" src="images/On_Off_Button1.png" alt="toggle" />
+          <img id="fancy-hover-toggle" class="fancy-sub-toggle" src="images/On_Off_Button8.png" alt="toggle" />
+        </div>
+        <div class="settings-row settings-sub-row">
+          <span class="settings-label">Glow</span>
+          <img id="fancy-glow-toggle" class="fancy-sub-toggle" src="images/On_Off_Button8.png" alt="toggle" />
+        </div>
+        <div id="fancy-glow-sub-options">
+          <div class="settings-row settings-sub-row settings-subsub-row">
+            <span class="settings-label">Marker Glow</span>
+            <img id="fancy-glow-markers-toggle" class="fancy-sub-toggle" src="images/On_Off_Button8.png" alt="toggle" />
+          </div>
         </div>
       </div>
     </div>
@@ -109,7 +129,7 @@
     <!-- Sub-screen 1: name entry -->
     <div id="online-name-screen" class="online-sub">
       <div class="online-panel">
-        <button id="online-name-close" type="button" class="panel-close-btn" aria-label="Schließen">
+        <button id="online-name-close" type="button" class="panel-close-btn" aria-label="Close">
           <img src="images/red-x.png" alt="×" />
         </button>
         <div class="online-panel-content">
@@ -130,7 +150,7 @@
     <!-- Sub-screen 2: lobby room -->
     <div id="online-lobby-room" class="online-sub hidden">
       <div class="online-panel">
-        <button id="online-lobby-close" type="button" class="panel-close-btn" aria-label="Schließen">
+        <button id="online-lobby-close" type="button" class="panel-close-btn" aria-label="Close">
           <img src="images/red-x.png" alt="×" />
         </button>
         <div class="online-panel-content">
@@ -152,6 +172,17 @@
       <div class="challenge-buttons">
         <button id="challenge-accept-btn" type="button">Accept</button>
         <button id="challenge-decline-btn" type="button" class="online-secondary">Decline</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Resign confirmation modal -->
+  <div id="resign-modal" class="hidden">
+    <div class="resign-box">
+      <p>Really resign?</p>
+      <div class="resign-buttons">
+        <button id="resign-confirm-btn" type="button">OK</button>
+        <button id="resign-cancel-btn"  type="button" class="online-secondary">Cancel</button>
       </div>
     </div>
   </div>

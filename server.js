@@ -31,8 +31,11 @@ const PIECE_INFO = {
   "04": { cost: 5, skins: 1  },
   "05": { cost: 9, skins: 6  },
   "06": { cost: 1, skins: 10 },
+  "10": { cost: 4, skins: 1  },
+  "11": { cost: 5, skins: 1  },
+  "12": { cost: 3, skins: 1  },
 };
-const HOTBAR_TYPES = ["01", "02", "03", "04", "05"];
+const HOTBAR_TYPES = ["01", "02", "03", "04", "05", "10", "11", "12"];
 const BUDGET = 20;
 
 function createEmptyBoard() {
@@ -154,6 +157,22 @@ function pseudoMoves(board, row, col, enPassant = null) {
     }
     case "04": slide(board, row, col, p, [[1,0],[-1,0],[0,1],[0,-1]], push); break;
     case "05": slide(board, row, col, p, [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]], push); break;
+
+    // ── Akrobat ("12"): Dame-Richtungen, springt über erste Figur, landet dahinter
+    case "12": {
+      const dirs12 = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+      for (const [dr, dc] of dirs12) {
+        let r = row + dr, c = col + dc;
+        while (inBounds(r, c) && !board[r][c]) { r += dr; c += dc; }
+        if (!inBounds(r, c)) continue;
+        const lr = r + dr, lc = c + dc;
+        if (!inBounds(lr, lc)) continue;
+        const landing = board[lr][lc];
+        if (!landing)                                                push(lr, lc, false);
+        else if (landing.color !== p.color && landing.type !== "00") push(lr, lc, true);
+      }
+      break;
+    }
   }
   return moves;
 }

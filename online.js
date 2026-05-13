@@ -57,6 +57,9 @@
         toRow:   to.row,   toCol:   to.col,
       });
     },
+    emitResign() {
+      if (socket) socket.emit("game:resign");
+    },
 
     hideLobby() {
       lobby$().classList.remove("visible");
@@ -400,14 +403,14 @@
     socket.on("game:over", ({ reason, winner }) => {
       if (reason === "resign") {
         const iWon = winner === myColor;
-        showEndScreen("Aufgabe!", iWon ? "Gegner hat aufgegeben — du gewinnst!" : "Du hast aufgegeben.");
+        showEndScreen("Resignation!", iWon ? "Opponent resigned — you win!" : "You resigned.");
       } else if (reason === "forfeit") {
-        showEndScreen("Sieg!", "Gegner hat nicht reconnected — du gewinnst!");
+        showEndScreen("Victory!", "Opponent didn't reconnect — you win!");
       } else if (reason === "stalemate") {
-        showEndScreen("Patt", "Unentschieden — kein gültiger Zug.");
+        showEndScreen("Stalemate", "Draw — no legal moves.");
       } else if (reason === "immediateCheck") {
         const iWon = winner === myColor;
-        showEndScreen("Sofortniederlage!", iWon ? "Gegner's König stand sofort im Schach — du gewinnst!" : "Dein König stand sofort im Schach — du verlierst!");
+        showEndScreen("Instant Loss!", iWon ? "Opponent's King was immediately in check — you win!" : "Your King is immediately in check — you lose!");
       }
       // checkmate is handled locally by checkGameOver()
       state.phase = PH_END;
@@ -427,7 +430,7 @@
 
     socket.on("game:forfeit", () => {
       discOverlay$().classList.add("hidden");
-      showEndScreen("Sieg!", "Gegner hat nicht reconnected — du gewinnst!");
+      showEndScreen("Victory!", "Opponent didn't reconnect — you win!");
       state.phase = PH_END;
       drawAll();
     });
