@@ -15,6 +15,7 @@
       <button id="play-btn" type="button">Play</button>
       <button id="play-online-btn" type="button">Play Online</button>
       <button id="hotbar-config-btn" type="button">⚙ Hotbar</button>
+      <button id="wappen-config-btn" type="button">⚔ Wappen</button>
     </div>
   </div>
 
@@ -25,6 +26,10 @@
         <img src="images/red-x.png" alt="×" />
       </button>
       <h2 class="hc-title">Hotbar</h2>
+      <div id="hc-tabs">
+        <button id="hc-tab-p1" type="button" class="hc-tab hc-tab-active">P1 · Online</button>
+        <button id="hc-tab-p2" type="button" class="hc-tab">P2</button>
+      </div>
       <p class="hc-subtitle">Click a piece — then a slot</p>
       <div id="hc-gallery"></div>
       <div class="hc-divider"><span>▼</span></div>
@@ -158,7 +163,6 @@
           <p class="online-waiting-label">Choose an opponent:</p>
           <div id="lobby-player-list"></div>
           <p id="lobby-status-msg" class="online-status"></p>
-          <button id="lobby-back-btn" type="button" class="online-secondary">Leave</button>
         </div>
       </div>
     </div>
@@ -193,6 +197,42 @@
       <p id="disconnect-msg">Opponent disconnected.</p>
       <p id="disconnect-sub" class="disconnect-sub">Waiting 60s for reconnect…</p>
       <button id="disconnect-return-btn" type="button">Return to Menu</button>
+    </div>
+  </div>
+
+  <!-- Wappen editor overlay -->
+  <div id="wappen-config" class="hidden">
+    <div class="wc-panel">
+      <button id="wc-close" type="button" aria-label="Close">
+        <img src="images/red-x.png" alt="×" />
+      </button>
+      <h2 class="wc-title">Coat of Arms</h2>
+
+      <!-- Full color picker -->
+      <div class="wc-picker">
+        <canvas id="wc-sv"  width="196" height="130"></canvas>
+        <canvas id="wc-hue" width="196" height="16"></canvas>
+        <div class="wc-picker-row">
+          <div id="wc-preview"></div>
+          <input id="wc-hex" type="text" maxlength="7" value="#000000"
+                 autocomplete="off" spellcheck="false" />
+          <button id="wc-eraser" type="button">⌫ Erase</button>
+        </div>
+      </div>
+
+      <!-- Drawing grids -->
+      <div class="wc-canvases">
+        <div class="wc-canvas-wrap">
+          <span class="wc-canvas-label">King</span>
+          <canvas id="wc-king"></canvas>
+          <button id="wc-clear-king" type="button" class="online-secondary">Clear</button>
+        </div>
+        <div class="wc-canvas-wrap">
+          <span class="wc-canvas-label">Pieces</span>
+          <canvas id="wc-piece"></canvas>
+          <button id="wc-clear-piece" type="button" class="online-secondary">Clear</button>
+        </div>
+      </div>
     </div>
   </div>
 

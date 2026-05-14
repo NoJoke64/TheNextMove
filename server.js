@@ -31,7 +31,7 @@ const PIECE_INFO = {
   "04": { cost: 5, skins: 1  },
   "05": { cost: 9, skins: 6  },
   "06": { cost: 1, skins: 10 },
-  "10": { cost: 4, skins: 1  },
+  "10": { cost: 4, skins: 5  },
   "11": { cost: 5, skins: 1  },
   "12": { cost: 3, skins: 1  },
 };
@@ -270,14 +270,17 @@ const games = new Map();
 const socketToGame = new Map();
 
 // Reconnect windows: name → { gameId, color, timer }
-const reconnectWindows = new Map();
 
 function broadcastLobby() {
-  const players = [];
+  const waiting = [];
   for (const [, info] of lobby) {
-    if (info.status === "waiting") players.push({ name: info.name });
+    if (info.status === "waiting") waiting.push(info.name);
   }
-  io.emit("lobby:state", { players });
+  const playing = [];
+  for (const [, g] of games) {
+    playing.push([g.names[P1], g.names[P2]]);
+  }
+  io.emit("lobby:state", { waiting, playing });
 }
 
 function findSocketByName(name) {
@@ -353,53 +356,39 @@ io.on("connection", socket => {
   console.log(`[+] ${socket.id} connected`);
 
   // ── LOBBY JOIN ──────────────────────────────────────────────
-  socket.on("lobby:join", ({ name }) => {
+  socket.on("lobby:join", ({ name, wappen, hotbar }) => {
     if (!name || typeof name !== "string") return;
     name = name.trim().slice(0, 16);
     if (!name) return;
 
-    // Check name uniqueness
-    for (const [, info] of lobby) {
-      if (info.name === name) {
-        socket.emit("lobby:name_taken");
-        return;
-      }
+    const newHotbar = Array.isArray(hotbar) && hotbar.length === 4 ? hotbar : null;
+    const newWappen = wappen || null;
+
+    // Idempotent re-join: same socket, same name → just reset to waiting
+    const existing = lobby.get(socket.id);
+    if (existing && existing.name === name) {
+      existing.status             = "waiting";
+      existing.wappen             = newWappen ?? existing.wappen;
+      existing.hotbar             = newHotbar  ?? existing.hotbar;
+      existing.pendingChallengeTo   = null;
+      existing.pendingChallengeFrom = null;
+      console.log(`  lobby:rejoin "${name}"`);
+      broadcastLobby();
+      return;
     }
 
-    // Check if returning from a reconnect window
-    if (reconnectWindows.has(name)) {
-      const rw = reconnectWindows.get(name);
-      clearTimeout(rw.timer);
-      reconnectWindows.delete(name);
-      const g = games.get(rw.gameId);
-      if (g) {
-        // Re-register socket in game
-        g.players[rw.color] = socket.id;
-        socketToGame.set(socket.id, rw.gameId);
-        lobby.set(socket.id, { name, status: "in-game" });
-
-        const opp = io.sockets.sockets.get(g.players[1 - rw.color]);
-        if (opp) opp.emit("game:opponent_reconnected");
-
-        socket.emit("game:reconnected", {
-          color:       rw.color,
-          opponentName: g.names[1 - rw.color],
-          board:       g.board,
-          budgets:     g.budgets,
-          hotbars:     g.hotbars,
-          phase:       g.phase,
-          current:     g.current,
-          setupDone:   g.setupDone,
-          kingsPlaced: g.kingsPlaced,
-          captured:    g.captured,
-          enPassant:   g.enPassant,
-        });
+    // Check name uniqueness (only against other sockets)
+    for (const [id, info] of lobby) {
+      if (id !== socket.id && info.name === name) {
+        socket.emit("lobby:name_taken");
         return;
       }
     }
 
     lobby.set(socket.id, {
       name,
+      wappen: newWappen,
+      hotbar: newHotbar,
       status: "waiting",
       pendingChallengeTo:   null,
       pendingChallengeFrom: null,
@@ -410,6 +399,20 @@ io.on("connection", socket => {
 
   // ── LOBBY LEAVE ─────────────────────────────────────────────
   socket.on("lobby:leave", () => {
+    const info = lobby.get(socket.id);
+    // Cancel any outgoing challenge
+    if (info && info.pendingChallengeTo) {
+      const target = lobby.get(info.pendingChallengeTo);
+      if (target) {
+        target.pendingChallengeFrom = null;
+        io.to(info.pendingChallengeTo).emit("challenge:cancelled", { challengerName: info.name });
+      }
+    }
+    // Cancel any incoming challenge
+    if (info && info.pendingChallengeFrom) {
+      const challenger = lobby.get(info.pendingChallengeFrom);
+      if (challenger) challenger.pendingChallengeTo = null;
+    }
     lobby.delete(socket.id);
     broadcastLobby();
   });
@@ -460,11 +463,13 @@ io.on("connection", socket => {
 
     io.to(challengerId).emit("game:start", {
       color: P1, opponentName: me.name,
-      hotbarP1: g.hotbars[P1], hotbarP2: g.hotbars[P2],
+      myHotbar: challenger.hotbar || g.hotbars[P1],
+      opponentWappen: me.wappen || null,
     });
     socket.emit("game:start", {
       color: P2, opponentName: challenger.name,
-      hotbarP1: g.hotbars[P1], hotbarP2: g.hotbars[P2],
+      myHotbar: me.hotbar || g.hotbars[P2],
+      opponentWappen: challenger.wappen || null,
     });
 
     broadcastLobby();
@@ -602,7 +607,12 @@ io.on("connection", socket => {
         : { reason: "stalemate", winner: null };
       io.to(g.players[P1]).emit("game:over", overPayload);
       io.to(g.players[P2]).emit("game:over", overPayload);
+      for (const sid of g.players) {
+        const pi = lobby.get(sid);
+        if (pi) pi.status = "waiting";
+      }
       cleanupGame(g.id);
+      broadcastLobby();
     } else {
       io.to(g.players[P1]).emit("game:turn_change", { current: g.current });
       io.to(g.players[P2]).emit("game:turn_change", { current: g.current });
@@ -616,7 +626,12 @@ io.on("connection", socket => {
     const color = colorForSocket(g, socket.id);
     io.to(g.players[P1]).emit("game:over", { reason: "resign", winner: 1 - color });
     io.to(g.players[P2]).emit("game:over", { reason: "resign", winner: 1 - color });
+    for (const sid of g.players) {
+      const pi = lobby.get(sid);
+      if (pi) pi.status = "waiting";
+    }
     cleanupGame(g.id);
+    broadcastLobby();
   });
 
   // ── DISCONNECT ──────────────────────────────────────────────
@@ -638,32 +653,19 @@ io.on("connection", socket => {
       if (challenger) challenger.pendingChallengeTo = null;
     }
 
-    // Mid-game disconnect
+    // Mid-game disconnect — immediately end game and return opponent to lobby
     const g = getGameForSocket(socket.id);
-    if (g && g.phase !== PH_END) {
+    if (g) {
       const color = colorForSocket(g, socket.id);
       const oppId = g.players[1 - color];
-      io.to(oppId).emit("game:opponent_disconnected");
-
-      // 60-second reconnect window
-      const name = info ? info.name : null;
-      if (name) {
-        const timer = setTimeout(() => {
-          reconnectWindows.delete(name);
-          const stillOngoing = games.has(g.id);
-          if (stillOngoing) {
-            io.to(oppId).emit("game:forfeit");
-            cleanupGame(g.id);
-          }
-        }, 60_000);
-        reconnectWindows.set(name, { gameId: g.id, color, timer });
-        // Keep game in map — don't clean up yet
-        socketToGame.delete(socket.id);
-      } else {
-        cleanupGame(g.id);
-      }
-    } else if (g) {
       cleanupGame(g.id);
+
+      // Return opponent to waiting lobby
+      const oppInfo = lobby.get(oppId);
+      if (oppInfo) oppInfo.status = "waiting";
+
+      // Notify opponent — they go straight back to lobby
+      io.to(oppId).emit("game:opponent_left");
     }
 
     lobby.delete(socket.id);
@@ -687,7 +689,12 @@ function _advanceSetupTurn(g) {
         const overPayload = { reason: "immediateCheck", winner: g.winner };
         io.to(g.players[P1]).emit("game:over", overPayload);
         io.to(g.players[P2]).emit("game:over", overPayload);
+        for (const sid of g.players) {
+          const pi = lobby.get(sid);
+          if (pi) pi.status = "waiting";
+        }
         cleanupGame(g.id);
+        broadcastLobby();
         return;
       }
     }

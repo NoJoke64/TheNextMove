@@ -232,7 +232,9 @@ canvas {
   box-shadow: 0 2px 0 #6b3a14;
 }
 #play-btn.fly-down,
-#play-online-btn.fly-down {
+#play-online-btn.fly-down,
+#hotbar-config-btn.fly-down,
+#wappen-config-btn.fly-down {
   animation: playBtnFly 0.28s ease-in forwards;
   pointer-events: none;
 }
@@ -241,6 +243,20 @@ canvas {
   20%  { transform: translateY(-28px); opacity: 1; }
   75%  { transform: translateY(60vh);  opacity: 1; }
   100% { transform: translateY(120vh); opacity: 0; }
+}
+
+#play-btn.fly-up,
+#play-online-btn.fly-up,
+#hotbar-config-btn.fly-up,
+#wappen-config-btn.fly-up {
+  animation: playBtnFlyUp 0.38s ease-out forwards;
+  pointer-events: none;
+}
+@keyframes playBtnFlyUp {
+  0%   { transform: translateY(120vh); opacity: 0; }
+  30%  { transform: translateY(60vh);  opacity: 1; }
+  80%  { transform: translateY(-14px); opacity: 1; }
+  100% { transform: translateY(0);     opacity: 1; }
 }
 
 #end-box {
@@ -421,6 +437,26 @@ canvas {
   letter-spacing: 2px;
   color: #ff8a3d;
 }
+#hc-tabs {
+  display: flex;
+  gap: 8px;
+}
+.hc-tab {
+  font-family: 'Press Start 2P', monospace;
+  font-size: 9px;
+  padding: 6px 18px;
+  background: transparent;
+  border: 2px solid rgba(240,232,216,0.25);
+  color: #6a6070;
+  cursor: pointer;
+  letter-spacing: 1px;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.hc-tab:hover { border-color: #c0b8a8; color: #c0b8a8; }
+.hc-tab-active.hc-tab:nth-child(1),
+#hc-tab-p1.hc-tab-active { border-color: #ff8a3d; color: #ff8a3d; background: rgba(255,138,61,0.1); }
+#hc-tab-p2.hc-tab-active { border-color: #4fc3ff; color: #4fc3ff; background: rgba(79,195,255,0.1); }
+
 .hc-subtitle {
   font-size: 6px;
   color: #c0b8a8;
@@ -495,6 +531,11 @@ canvas {
 }
 .hc-slot:hover { border-color: rgba(240,232,216,0.6); }
 .hc-slot.hc-drop-target { border-color: #ff8a3d; background: rgba(255,138,61,0.1); }
+/* P2 tab — cyan selection colours */
+.hc-panel.hc-p2 .hc-tile.hc-selected { border-color: #4fc3ff; background: rgba(79,195,255,0.12); }
+.hc-panel.hc-p2 .hc-slot.hc-drop-target { border-color: #4fc3ff; background: rgba(79,195,255,0.10); }
+.hc-slot.hc-drag-over { border-color: #ffe45c; background: rgba(255,228,92,0.15); transform: scale(1.06); }
+.hc-panel.hc-p2 .hc-slot.hc-drag-over { border-color: #ffe45c; background: rgba(255,228,92,0.15); }
 .hc-slot img {
   width: 69px; height: 69px;
   image-rendering: pixelated;
@@ -573,6 +614,8 @@ canvas {
   align-items: center;
   font-family: 'Press Start 2P', monospace;
   min-width: 380px;
+  max-height: 90vh;
+  overflow-y: auto;
 }
 .online-panel-content {
   display: flex;
@@ -741,6 +784,44 @@ canvas {
   letter-spacing: 1px;
   text-align: center;
   padding: 16px 0;
+}
+
+.lobby-ingame-label {
+  font-size: 7px;
+  color: #807090;
+  letter-spacing: 1px;
+  text-align: left;
+  padding: 10px 0 4px;
+  border-top: 1px solid rgba(255,255,255,0.10);
+  margin-top: 4px;
+}
+.lobby-ingame-entry { opacity: 0.6; pointer-events: none; }
+.lobby-ingame-badge {
+  font-family: 'Press Start 2P', monospace;
+  font-size: 6px;
+  color: #9080a8;
+  letter-spacing: 1px;
+}
+.lobby-vs-text {
+  color: #9080a8;
+  font-size: 7px;
+}
+
+/* "You" self-entry in lobby list */
+.lobby-self-entry {
+  background: rgba(79, 195, 255, 0.06);
+  border-color: rgba(79, 195, 255, 0.20);
+}
+.lobby-self-entry .lobby-player-name {
+  color: #4fc3ff;
+}
+.lobby-self-badge {
+  font-family: 'Press Start 2P', monospace;
+  font-size: 6px;
+  color: #4fc3ff;
+  opacity: 0.6;
+  letter-spacing: 1px;
+  flex-shrink: 0;
 }
 
 /* ========== Challenge modal ========== */
@@ -942,3 +1023,156 @@ canvas {
   opacity: 0.35;
   pointer-events: none;
 }
+
+/* ========== Wappen button ========== */
+#wappen-config-btn {
+  background: transparent;
+  border: 2px solid rgba(240, 232, 216, 0.35);
+  color: #c0b8a8;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 9px;
+  padding: 10px 20px;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+#wappen-config-btn:hover { border-color: #f0e8d8; color: #f0e8d8; }
+
+/* ========== Wappen overlay ========== */
+#wappen-config {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.82);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 320;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+#wappen-config.visible  { opacity: 1; pointer-events: auto; }
+#wappen-config.hidden   { display: none; }
+
+.wc-panel {
+  position: relative;
+  background: #2a1f3a;
+  border: 4px solid #ff8a3d;
+  box-shadow: 0 8px 0 #1a1422;
+  padding: 36px 28px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  font-family: 'Press Start 2P', monospace;
+}
+#wc-close {
+  position: absolute;
+  top: 10px; right: 10px;
+  background: none; border: none;
+  cursor: pointer; padding: 0; line-height: 0;
+}
+#wc-close img {
+  width: 44px; height: auto;
+  image-rendering: pixelated;
+  display: block;
+  transition: transform 0.1s ease;
+}
+#wc-close:hover img { transform: scale(1.15); }
+
+.wc-title {
+  font-size: 12px;
+  letter-spacing: 2px;
+  color: #ff8a3d;
+}
+
+/* ── Color picker ── */
+.wc-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+#wc-sv {
+  width: 100%;
+  height: 130px;
+  cursor: crosshair;
+  display: block;
+  border-radius: 2px;
+}
+#wc-hue {
+  width: 100%;
+  height: 16px;
+  cursor: crosshair;
+  display: block;
+  border-radius: 2px;
+}
+.wc-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+#wc-preview {
+  width: 28px;
+  height: 28px;
+  border: 2px solid #4a3a5a;
+  flex-shrink: 0;
+  border-radius: 2px;
+}
+#wc-hex {
+  font-family: 'Press Start 2P', monospace;
+  font-size: 7px;
+  background: #1a1422;
+  color: #f0e8d8;
+  border: 2px solid #4a3a5a;
+  padding: 5px 6px;
+  width: 88px;
+  letter-spacing: 1px;
+  outline: none;
+}
+#wc-hex:focus { border-color: #ff8a3d; }
+#wc-eraser {
+  font-family: 'Press Start 2P', monospace;
+  font-size: 7px;
+  background: #1a1422;
+  color: #c0b8a8;
+  border: 2px solid #4a3a5a;
+  padding: 5px 8px;
+  cursor: pointer;
+  letter-spacing: 1px;
+  flex-shrink: 0;
+  transition: border-color 0.1s, color 0.1s, background 0.1s;
+}
+#wc-eraser:hover { border-color: #f0e8d8; color: #f0e8d8; }
+#wc-eraser.wc-eraser-on {
+  background: #3a2a50;
+  border-color: #ff8a3d;
+  color: #ff8a3d;
+}
+
+/* ── Drawing grids ── */
+.wc-canvases {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+.wc-canvas-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.wc-canvas-label {
+  font-size: 6px;
+  letter-spacing: 1px;
+  color: #c0b8a8;
+  text-transform: uppercase;
+}
+.wc-canvas-wrap canvas {
+  border: 2px solid #4a3a5a;
+  cursor: crosshair;
+  image-rendering: pixelated;
+  display: block;
+}
+.wc-canvas-wrap canvas:hover { border-color: #ff8a3d; }

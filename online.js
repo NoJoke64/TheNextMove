@@ -26,12 +26,13 @@
   const restartBtn$ = () => document.getElementById("restart-btn");
 
   // ── State ─────────────────────────────────────────────────
-  let socket         = null;
-  let myName         = "";
-  let myColor        = null;   // 0 | 1
-  let pendingChallenger = null; // name of person challenging us
-  let challengeSent  = false;  // debounce: we sent a challenge
-  let reconnectTimer = null;
+  let socket            = null;
+  let myName            = "";
+  let myColor           = null;   // 0 | 1
+  let pendingChallenger = null;   // name of person challenging us
+  let challengeSent     = false;  // debounce: we sent a challenge
+  let reconnectTimer    = null;
+  let _leavingLobby     = false;  // true while animating back to start screen
 
   // ── Public API (window.Online) ────────────────────────────
   const Online = {
@@ -71,9 +72,9 @@
       resetGame();                   // clears state.online
       stageWrap$().classList.remove("visible");
       _showLobbyRoom();
-      // Re-register in lobby with same name
+      // Re-register in lobby with same name (idempotent on server)
       if (socket && myName) {
-        socket.emit("lobby:join", { name: myName });
+        socket.emit("lobby:join", { name: myName, wappen: _getLocalWappen(), hotbar: _getP1Hotbar() });
       }
     },
   };
@@ -86,39 +87,54 @@
     document.getElementById("play-online-btn").addEventListener("click", () => {
       const btn     = document.getElementById("play-online-btn");
       const playBtn = document.getElementById("play-btn");
-      // Fly both buttons down together
+      // Fly all start-screen buttons down together
       btn.classList.add("fly-down");
       playBtn.classList.add("fly-down");
+      document.getElementById("hotbar-config-btn").classList.add("fly-down");
+      document.getElementById("wappen-config-btn").classList.add("fly-down");
       btn.addEventListener("animationend", () => {
         startScreen$().classList.add("hidden");
         _connectAndShowLobby();
       }, { once: true });
     });
 
-    // "Back" / red-X from name-entry → return to start screen
-    function _leaveToStartScreen() {
+    // Shared: hide lobby, show start screen, fly all 4 buttons back up
+    function _returnToStartScreen(emitLeave) {
+      _leavingLobby = true;   // block lobby:state from re-opening the lobby
+      if (emitLeave && socket) socket.emit("lobby:leave");
       lobby$().classList.remove("visible");
-      startScreen$().classList.remove("hidden");
-      startScreen$().style.opacity = "1";
-      startScreen$().style.pointerEvents = "";
+
+      const startScreen = startScreen$();
+      startScreen.classList.remove("hidden");
+      startScreen.style.opacity       = "";  // clear inline — let CSS class control opacity
+      startScreen.style.pointerEvents = "";
+
+      // Two nested rAFs: first frame removes fly-down (committed by browser),
+      // second frame adds fly-up as a fresh animation — prevents pointer-events: none
+      // from getting stuck if the browser merges both classList changes into one tick.
+      const btnIds = ["play-btn", "play-online-btn", "hotbar-config-btn", "wappen-config-btn"];
+      requestAnimationFrame(() => {
+        for (const id of btnIds) document.getElementById(id).classList.remove("fly-down");
+        requestAnimationFrame(() => {
+          for (const id of btnIds) {
+            const b = document.getElementById(id);
+            b.classList.add("fly-up");
+            b.addEventListener("animationend", () => b.classList.remove("fly-up"), { once: true });
+          }
+        });
+      });
     }
-    document.getElementById("name-back-btn").addEventListener("click", _leaveToStartScreen);
-    document.getElementById("online-name-close").addEventListener("click", _leaveToStartScreen);
+
+    // Name-entry screen: X and Back → return without emitting lobby:leave (not yet joined)
+    document.getElementById("online-name-close").addEventListener("click", () => _returnToStartScreen(false));
+    document.getElementById("name-back-btn").addEventListener("click",     () => _returnToStartScreen(false));
 
     // "Join" — submit name
     document.getElementById("name-confirm-btn").addEventListener("click", _submitName);
     nameInput$().addEventListener("keydown", e => { if (e.key === "Enter") _submitName(); });
 
-    // "Leave" / red-X from lobby room → disconnect and back to start screen
-    function _leaveLobbyToStartScreen() {
-      if (socket) socket.emit("lobby:leave");
-      lobby$().classList.remove("visible");
-      startScreen$().classList.remove("hidden");
-      startScreen$().style.opacity = "1";
-      startScreen$().style.pointerEvents = "";
-    }
-    document.getElementById("lobby-back-btn").addEventListener("click", _leaveLobbyToStartScreen);
-    document.getElementById("online-lobby-close").addEventListener("click", _leaveLobbyToStartScreen);
+    // Lobby room X → disconnect server-side, then fly back up
+    document.getElementById("online-lobby-close").addEventListener("click", () => _returnToStartScreen(true));
 
     // Challenge modal — Accept
     document.getElementById("challenge-accept-btn").addEventListener("click", () => {
@@ -143,9 +159,9 @@
       _returnToMenu();
     });
 
-    // Restart button override in online mode
+    // Restart button override — only intercept when an online game is actually active
     restartBtn$().addEventListener("click", e => {
-      if (state.online.active || (socket && myName)) {
+      if (state.online.active) {
         e.stopImmediatePropagation();
         Online.returnToLobby();
       }
@@ -154,6 +170,7 @@
 
   // ── Connect socket & show name screen ─────────────────────
   function _connectAndShowLobby() {
+    _leavingLobby = false;   // ← clear any leftover leave-guard from a previous session
     // Connect socket if not already connected
     if (!socket) {
       socket = io();
@@ -162,7 +179,9 @@
 
     // Prepare sub-screens
     nameError$().classList.add("hidden");
-    nameInput$().value = myName || "";
+    // Pre-fill name: in-session memory first, then localStorage
+    const savedName = localStorage.getItem("tnm_online_name") || "";
+    nameInput$().value = myName || savedName;
     nameScreen$().classList.remove("hidden");
     lobbyRoom$().classList.add("hidden");
 
@@ -179,11 +198,27 @@
     const raw  = nameInput$().value.trim().slice(0, 16);
     if (!raw) return;
     myName = raw;
+    localStorage.setItem("tnm_online_name", myName); // persist name
     nameError$().classList.add("hidden");
-    if (socket) socket.emit("lobby:join", { name: myName });
+    if (socket) socket.emit("lobby:join", { name: myName, wappen: _getLocalWappen(), hotbar: _getP1Hotbar() });
+  }
+
+  function _getLocalWappen() {
+    try {
+      const raw = localStorage.getItem("tnm_wappen_v1");
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) { return null; }
+  }
+
+  function _getP1Hotbar() {
+    try {
+      const raw = localStorage.getItem("tnm_hotbar_v1");
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) { return null; }
   }
 
   function _showLobbyRoom() {
+    _leavingLobby = false;   // we're actively in the lobby now
     nameScreen$().classList.add("hidden");
     lobbyRoom$().classList.remove("hidden");
     lobby$().classList.add("visible");
@@ -191,14 +226,29 @@
   }
 
   // ── Lobby player list rendering ───────────────────────────
-  function _renderLobbyList(players) {
+  // waiting: string[]  — names of players in "waiting" state (includes self)
+  // playing: [string, string][]  — pairs of names currently in a game
+  function _renderLobbyList(waiting, playing) {
     const list = playerList$();
     list.innerHTML = "";
 
-    // Filter out self
-    const others = players.filter(p => p.name !== myName);
+    // ── Self entry (always shown if we're in the lobby)
+    const selfEntry = document.createElement("div");
+    selfEntry.className = "lobby-player-entry lobby-self-entry";
+    const selfName = document.createElement("span");
+    selfName.className = "lobby-player-name";
+    selfName.textContent = myName;
+    const selfBadge = document.createElement("span");
+    selfBadge.className = "lobby-self-badge";
+    selfBadge.textContent = "You";
+    selfEntry.appendChild(selfName);
+    selfEntry.appendChild(selfBadge);
+    list.appendChild(selfEntry);
 
-    if (others.length === 0) {
+    // ── Other waiting players
+    const others = waiting.filter(n => n !== myName);
+
+    if (others.length === 0 && playing.length === 0) {
       const msg = document.createElement("p");
       msg.className = "lobby-empty-msg";
       msg.textContent = "No one else here yet…";
@@ -206,13 +256,13 @@
       return;
     }
 
-    for (const player of others) {
+    for (const name of others) {
       const entry = document.createElement("div");
       entry.className = "lobby-player-entry";
 
       const nameSpan = document.createElement("span");
       nameSpan.className = "lobby-player-name";
-      nameSpan.textContent = player.name;
+      nameSpan.textContent = name;
 
       const btn = document.createElement("button");
       btn.className = "lobby-challenge-btn";
@@ -220,12 +270,32 @@
       if (challengeSent) btn.disabled = true;
       btn.addEventListener("click", () => {
         if (challengeSent) return;
-        _sendChallenge(player.name);
+        _sendChallenge(name);
       });
 
       entry.appendChild(nameSpan);
       entry.appendChild(btn);
       list.appendChild(entry);
+    }
+
+    // ── Playing pairs
+    if (playing.length > 0) {
+      const divider = document.createElement("p");
+      divider.className = "lobby-ingame-label";
+      divider.textContent = "In game:";
+      list.appendChild(divider);
+
+      for (const [p1, p2] of playing) {
+        const entry = document.createElement("div");
+        entry.className = "lobby-player-entry lobby-ingame-entry";
+
+        const nameSpan = document.createElement("span");
+        nameSpan.className = "lobby-player-name lobby-vs-text";
+        nameSpan.textContent = `${p1} vs ${p2}`;
+
+        entry.appendChild(nameSpan);
+        list.appendChild(entry);
+      }
     }
   }
 
@@ -242,7 +312,7 @@
   }
 
   // ── Start the online game ─────────────────────────────────
-  function _startOnlineGame(color, opponentName, hotbarP1, hotbarP2) {
+  function _startOnlineGame(color, opponentName, myHotbar) {
     myColor = color;
     challengeSent = false;
 
@@ -254,14 +324,13 @@
     const stageWrap = stageWrap$();
 
     // Prepare game state for online
-    resetGame();  // clears board, sets PH_KING_PLACE
+    resetGame();  // clears board, sets PH_KING_PLACE (also loads local hotbars)
     state.online.active       = true;
     state.online.myColor      = color;
     state.online.opponentName = opponentName;
 
-    // Set hotbars from server (both players must see same hotbars)
-    state.hotbars[0] = hotbarP1;
-    state.hotbars[1] = hotbarP2;
+    // Use the player's own P1 hotbar for their color
+    if (myHotbar) state.hotbars[color] = myHotbar;
 
     // Fix viewFlipped to our perspective for the entire game
     state.viewFlipped = (color === 1); // P2 always sees from the bottom
@@ -276,6 +345,7 @@
   function _applyOpponentKingPlace(row, col, skin, color) {
     state.board[row][col] = { color, type: "00", skin: skin || 0 };
     state.kingsPlaced[color] = true;
+    if (window.Sounds) Sounds.play("place");
     // advance phase/turn same as local (server already sends phase_change / turn_change)
     drawAll();
   }
@@ -283,6 +353,7 @@
   function _applyOpponentPiecePlace(row, col, type, skin, color) {
     state.board[row][col] = { color, type, skin };
     state.budgets[color] -= PIECE_INFO[type]?.cost ?? 0;
+    if (window.Sounds) Sounds.play("place");
     drawAll();
   }
 
@@ -291,6 +362,7 @@
     const to   = { row: toRow,   col: toCol   };
     applyMoveOnBoard(state.board, from, to, { recordCapture: true, isEnPassant });
     state.enPassant = newEnPassant || null;
+    if (window.Sounds) Sounds.play("place");
     drawAll();
   }
 
@@ -309,10 +381,10 @@
     lobby$().classList.remove("visible");
     resetGame();
 
-    // Re-enter lobby
+    // Re-enter lobby (idempotent: server already set us to "waiting")
     _showLobbyRoom();
     if (socket && myName) {
-      socket.emit("lobby:join", { name: myName });
+      socket.emit("lobby:join", { name: myName, wappen: _getLocalWappen(), hotbar: _getP1Hotbar() });
     }
   }
 
@@ -329,11 +401,11 @@
 
     // ── Lobby events ────────────────────────────────────────
 
-    socket.on("lobby:state", ({ players }) => {
-      // Ignore lobby updates while we're in an active game
-      if (state.online.active) return;
+    socket.on("lobby:state", ({ waiting, playing }) => {
+      // Ignore while in-game or while we're navigating away from the lobby
+      if (state.online.active || _leavingLobby) return;
       _showLobbyRoom();
-      _renderLobbyList(players);
+      _renderLobbyList(waiting || [], playing || []);
     });
 
     socket.on("lobby:name_taken", () => {
@@ -364,8 +436,9 @@
 
     // ── Game start ──────────────────────────────────────────
 
-    socket.on("game:start", ({ color, opponentName, hotbarP1, hotbarP2 }) => {
-      _startOnlineGame(color, opponentName, hotbarP1, hotbarP2);
+    socket.on("game:start", ({ color, opponentName, myHotbar, opponentWappen }) => {
+      _startOnlineGame(color, opponentName, myHotbar);
+      if (window.setOnlineWappens) setOnlineWappens(color, opponentWappen);
     });
 
     // ── In-game events ───────────────────────────────────────
@@ -417,38 +490,9 @@
       drawAll();
     });
 
-    socket.on("game:opponent_disconnected", () => {
-      _showDisconnectOverlay(
-        "Opponent disconnected.",
-        "Waiting 60 s for reconnect…"
-      );
-    });
-
-    socket.on("game:opponent_reconnected", () => {
-      discOverlay$().classList.add("hidden");
-    });
-
-    socket.on("game:forfeit", () => {
-      discOverlay$().classList.add("hidden");
-      showEndScreen("Victory!", "Opponent didn't reconnect — you win!");
-      state.phase = PH_END;
-      drawAll();
-    });
-
-    socket.on("game:reconnected", ({ color, opponentName, board, budgets,
-                                     hotbars, phase, current, setupDone,
-                                     kingsPlaced, captured, enPassant }) => {
-      _startOnlineGame(color, opponentName, hotbars[0], hotbars[1]);
-      state.board       = board;
-      state.budgets     = budgets;
-      state.phase       = phase;
-      state.current     = current;
-      state.setupDone   = setupDone;
-      state.kingsPlaced = kingsPlaced;
-      state.captured    = captured;
-      state.enPassant   = enPassant || null;
-      discOverlay$().classList.add("hidden");
-      drawAll();
+    socket.on("game:opponent_left", () => {
+      _returnToMenu();
+      lobbyMsg$().textContent = "Opponent left the game.";
     });
   }
 

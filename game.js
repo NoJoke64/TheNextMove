@@ -1,6 +1,37 @@
 "use strict";
 
 // ============================================================
+// Sounds
+// ============================================================
+const Sounds = (() => {
+  const _buf = {};
+  function _load(name, src, vol) {
+    const a = new Audio(src);
+    a.volume = vol;
+    _buf[name] = a;
+  }
+  _load("click",  "sounds/click.mp3",  0.45);
+  _load("place",  "sounds/place.mp3",  0.55);
+  _load("select", "sounds/select.mp3", 0.56);
+  return {
+    play(name) {
+      const src = _buf[name];
+      if (!src) return;
+      const clone = /** @type {HTMLAudioElement} */ (src.cloneNode());
+      clone.volume = src.volume;
+      clone.play().catch(() => {});
+    }
+  };
+})();
+window.Sounds = Sounds;
+
+// Global button-click sound — capture phase catches all <button>s,
+// including dynamically created ones (lobby list, modals, etc.)
+document.addEventListener("click", e => {
+  if (e.target.closest("button")) Sounds.play("click");
+}, true);
+
+// ============================================================
 // Constants
 // ============================================================
 const CELL = 23;
@@ -519,7 +550,7 @@ const PIECE_INFO = {
   "04": { name: "Rook",         cost: 5, skins: 1  },
   "05": { name: "Queen",        cost: 9, skins: 6  },
   "06": { name: "Double Pawn",  cost: 1, skins: 10 },
-  "10": { name: "Blocker",      cost: 4, skins: 1  },
+  "10": { name: "Blocker",      cost: 4, skins: 5  },
   "11": { name: "Sumo Wrestler",cost: 5, skins: 1  },
   "12": { name: "Acrobat",      cost: 3, skins: 1  },
 };
@@ -1132,6 +1163,9 @@ function drawBoard() {
         sCtx.imageSmoothingEnabled = false;
         sCtx.drawImage(img, 0, 0, spriteSize, spriteSize);
 
+        // Bake wappen directly onto sprite canvas (inherits shadow/sway/zoom)
+        _drawWappenOnSprite(sCtx, spriteSize, p.type, p.color);
+
         // 2. Composite the sprite canvas onto the board canvas WITH smoothing so
         //    any transforms (sway, zoom) benefit from bilinear filtering.
         boardCtx.imageSmoothingEnabled = true;
@@ -1177,6 +1211,8 @@ function drawBoard() {
       } else {
         // ── Non-fancy path: nearest-neighbour direct draw ─────────────────────
         boardCtx.drawImage(img, imgX, imgY);
+        // Wappen on non-fancy path (no sprite canvas — draw directly in logical px)
+        drawWappenOnPiece(boardCtx, imgX, imgY, p.type, p.color);
       }
 
       boardCtx.restore();
@@ -1231,6 +1267,7 @@ function drawBoard() {
           try { boardCtx.filter = "saturate(50%)"; } catch (e) {}
           boardCtx.globalAlpha = 0.5;
           boardCtx.drawImage(img, x, y + PIECE_VISUAL_OFFSET_Y);
+          drawWappenOnPiece(boardCtx, x, y + PIECE_VISUAL_OFFSET_Y, previewPiece.type, previewPiece.color);
           boardCtx.restore();
         }
       }
@@ -1370,10 +1407,12 @@ function _drawDragCanvas() {
       sCtx.clearRect(0, 0, spriteSize, spriteSize);
       sCtx.imageSmoothingEnabled = false;
       sCtx.drawImage(img, 0, 0, spriteSize, spriteSize);
+      _drawWappenOnSprite(sCtx, spriteSize, dragPiece.type, dragPiece.color);
       _dragCtx.drawImage(_spriteCanvas, imgX, imgY, CELL, CELL);
     } else {
       _dragCtx.imageSmoothingEnabled = false;
       _dragCtx.drawImage(img, imgX, imgY);
+      drawWappenOnPiece(_dragCtx, imgX, imgY, dragPiece.type, dragPiece.color);
     }
 
     _dragCtx.restore();
@@ -1601,6 +1640,7 @@ function drawHotbar() {
       sCtx.clearRect(0, 0, spriteSize, spriteSize);
       sCtx.imageSmoothingEnabled = false;
       sCtx.drawImage(img, 0, 0, spriteSize, spriteSize);
+      _drawWappenOnSprite(sCtx, spriteSize, type, player);
 
       hotbarCtx.imageSmoothingEnabled = true;
       hotbarCtx.imageSmoothingQuality = "high";
@@ -1752,8 +1792,8 @@ function drawHud() {
     finishBtn.classList.add("hidden");
   }
 
-  // "Aufgeben" nur während laufendem Spiel sichtbar
-  if (state.phase === PH_PLAY) {
+  // Resign sichtbar in allen Phasen außer PH_END
+  if (state.phase !== PH_END) {
     resignBtn.classList.remove("hidden");
   } else {
     resignBtn.classList.add("hidden");
@@ -1909,6 +1949,7 @@ function onPointerDown(evt) {
       if (slot === null) return;
       const type = state.hotbars[player][slot];
       if (state.budgets[player] < PIECE_INFO[type].cost) return;
+      Sounds.play("select");
       state.selectedHotbarIdx[player] = slot;
       state.pointer = {
         source: "hotbar",
@@ -2081,6 +2122,7 @@ function handleDrop(ptr, clientX, clientY) {
       if (!canPlaceKingAt(player, cell.row, cell.col)) return;
       state.board[cell.row][cell.col] = makePiece(player, "00", 0);
       state.kingsPlaced[player] = true;
+      Sounds.play("place");
       if (state.online.active && window.Online) Online.emitKingPlace(cell.row, cell.col, 0);
       nextPlayerOrAdvance();
       return;
@@ -2093,6 +2135,7 @@ function handleDrop(ptr, clientX, clientY) {
       if (!canPlacePieceAt(player, cell.row, cell.col)) return;
       state.board[cell.row][cell.col] = makePiece(player, type);
       state.budgets[player] -= PIECE_INFO[type].cost;
+      Sounds.play("place");
       if (state.online.active && window.Online) Online.emitPiecePlace(cell.row, cell.col, type, state.board[cell.row][cell.col].skin);
       recomputeSetupDoneAfterPlacement(player);
       advanceSetupTurn();
@@ -2116,6 +2159,7 @@ function handleDrop(ptr, clientX, clientY) {
       pushFromRow: move.pushFromRow, pushFromCol: move.pushFromCol,
       pushToRow:   move.pushToRow,   pushToCol:   move.pushToCol,
     });
+    Sounds.play("place");
     if (state.online.active && window.Online) Online.emitMove(from, cell);
     state.selectedSquare = null;
     state.legalMoves = [];
@@ -2130,6 +2174,7 @@ function handleBoardClick(row, col) {
     if (!canPlaceKingAt(player, row, col)) return;
     state.board[row][col] = makePiece(player, "00", 0);
     state.kingsPlaced[player] = true;
+    Sounds.play("place");
     if (state.online.active && window.Online) Online.emitKingPlace(row, col, 0);
     nextPlayerOrAdvance();
     return;
@@ -2144,6 +2189,7 @@ function handleBoardClick(row, col) {
     if (!canPlacePieceAt(player, row, col)) return;
     state.board[row][col] = makePiece(player, type);
     state.budgets[player] -= PIECE_INFO[type].cost;
+    Sounds.play("place");
     if (state.online.active && window.Online) Online.emitPiecePlace(row, col, type, state.board[row][col].skin);
     recomputeSetupDoneAfterPlacement(player);
     advanceSetupTurn();
@@ -2162,6 +2208,7 @@ function handleBoardClick(row, col) {
       pushFromRow: move.pushFromRow, pushFromCol: move.pushFromCol,
       pushToRow:   move.pushToRow,   pushToCol:   move.pushToCol,
         });
+        Sounds.play("place");
         if (state.online.active && window.Online) Online.emitMove(sel, { row, col });
         state.selectedSquare = null;
         state.legalMoves = [];
@@ -2169,6 +2216,7 @@ function handleBoardClick(row, col) {
         return;
       }
       if (piece && piece.color === state.current) {
+        Sounds.play("select");
         state.selectedSquare = { row, col };
         state.legalMoves = legalMoves(state.board, row, col);
         return;
@@ -2178,6 +2226,7 @@ function handleBoardClick(row, col) {
       return;
     } else {
       if (piece && piece.color === state.current) {
+        Sounds.play("select");
         state.selectedSquare = { row, col };
         state.legalMoves = legalMoves(state.board, row, col);
       }
@@ -2370,8 +2419,10 @@ function flipAnimFrame(now) {
   for (const item of a.pieces) {
     const x = item.from.x + (item.to.x - item.from.x) * e;
     const y = item.from.y + (item.to.y - item.from.y) * e;
+    const rx = Math.round(x), ry = Math.round(y);
     const img = images[pieceFile(item.p)];
-    if (img) boardCtx.drawImage(img, Math.round(x), Math.round(y));
+    if (img) boardCtx.drawImage(img, rx, ry);
+    drawWappenOnPiece(boardCtx, rx, ry, item.p.type, item.p.color);
   }
 
   if (fancyGraphics && fancyGlow) {
@@ -2412,7 +2463,7 @@ function resetGame() {
   state.viewFlipped = false;
   state.board = createEmptyBoard();
   state.budgets = [BUDGET, BUDGET];
-  state.hotbars = [loadCustomHotbar(), loadCustomHotbar()];
+  state.hotbars = [loadCustomHotbar(0), loadCustomHotbar(1)];
   state.selectedHotbarIdx = [null, null];
   state.selectedSquare = null;
   state.legalMoves = [];
@@ -2430,6 +2481,7 @@ function resetGame() {
   _hoverPreviewCell = null; _hoverPreviewMoves = null;
   state.captured = [[], []];
   state.online = { active: false, myColor: null, opponentName: "" };
+  wappenByColor = [wappenData, wappenData];
   setDragOverlay(false, "");
   document.getElementById("end-overlay").classList.add("hidden");
   document.getElementById("disconnect-overlay").classList.add("hidden");
@@ -2466,9 +2518,314 @@ function saveSettings() {
   } catch (_) {}
 }
 
+// ============================================================
+// Wappen (Coat of Arms) — pixel editor + board overlay
+// ============================================================
+const WAPPEN_STORAGE_KEY = "tnm_wappen_v1";
+const WAPPEN_KING_COLS  = 4;
+const WAPPEN_KING_ROWS  = 4;
+const WAPPEN_PIECE_COLS = 3;
+const WAPPEN_PIECE_ROWS = 3;
+
+// 1 = drawable cell, 0 = disabled (outside shield silhouette)
+const WAPPEN_MASK_KING = [
+  [1,1,1,1],
+  [1,1,1,1],
+  [1,1,1,1],
+  [0,1,1,0],
+];
+const WAPPEN_MASK_PIECE = [
+  [1,1,1],
+  [1,1,1],
+  [0,1,0],
+];
+
+let wappenData = {
+  king:  Array.from({length: WAPPEN_KING_ROWS},  () => Array(WAPPEN_KING_COLS).fill(null)),
+  piece: Array.from({length: WAPPEN_PIECE_ROWS}, () => Array(WAPPEN_PIECE_COLS).fill(null)),
+};
+// In online mode index 0/1 hold P1/P2 wappens; offline both point to the same local data.
+let wappenByColor = [wappenData, wappenData];
+
+function loadWappen() {
+  try {
+    const raw = localStorage.getItem(WAPPEN_STORAGE_KEY);
+    if (!raw) return;
+    const d = JSON.parse(raw);
+    if (Array.isArray(d.king)  && d.king.length  === WAPPEN_KING_ROWS)  wappenData.king  = d.king;
+    if (Array.isArray(d.piece) && d.piece.length === WAPPEN_PIECE_ROWS) wappenData.piece = d.piece;
+  } catch (_) {}
+}
+function saveWappen() {
+  try { localStorage.setItem(WAPPEN_STORAGE_KEY, JSON.stringify(wappenData)); } catch (_) {}
+}
+
+// Called by online.js at game start to inject the opponent's wappen.
+window.setOnlineWappens = function(myColor, opponentWappen) {
+  wappenByColor[myColor]     = wappenData;
+  wappenByColor[1 - myColor] = opponentWappen || wappenData;
+};
+// Reset to local-only when game ends / resets.
+window.resetWappenByColor = function() {
+  wappenByColor = [wappenData, wappenData];
+};
+
+// Per-type wappen anchor (top-left of badge, in logical px within 23×23 sprite).
+// King ("00") and Acrobat ("12") fall back to centered calculation.
+const WAPPEN_POS_X = { "00":9,"01":11,"02":10,"03":9,"04":10,"05":11,"06":11,"10":8,"11":11,"12":12 };
+const WAPPEN_POS_Y = { "00":12,"01":14,"02":14,"03":14,"04":11,"05":12,"06":16,"10":14,"11":18,"12":13 };
+
+function _wappenOffset(type, cols, rows, px, spriteScale) {
+  // spriteScale: multiply logical px → sprite-canvas px (pass 1 for board-logical)
+  if (WAPPEN_POS_X[type] !== undefined) {
+    return {
+      ox: Math.round(WAPPEN_POS_X[type] * spriteScale),
+      oy: Math.round(WAPPEN_POS_Y[type] * spriteScale),
+    };
+  }
+  // Fallback: centered (used for King "00" and Acrobat "12")
+  const total = Math.round(CELL * spriteScale);
+  return {
+    ox: Math.round((total - cols * px) / 2),
+    oy: Math.round((total - rows * px) / 2) - px,
+  };
+}
+
+// Non-fancy path: draw in logical px directly on the board canvas
+function drawWappenOnPiece(ctx, imgX, imgY, type, pieceColor = 0) {
+  const isKing = type === "00";
+  const wd = wappenByColor[pieceColor] || wappenData;
+  const data = isKing ? wd.king  : wd.piece;
+  const mask = isKing ? WAPPEN_MASK_KING : WAPPEN_MASK_PIECE;
+  const cols = isKing ? WAPPEN_KING_COLS : WAPPEN_PIECE_COLS;
+  const rows = isKing ? WAPPEN_KING_ROWS : WAPPEN_PIECE_ROWS;
+  const { ox, oy } = _wappenOffset(type, cols, rows, 1, 1);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (!mask[r][c]) continue;
+      const color = data[r][c];
+      if (!color) continue;
+      ctx.fillStyle = color;
+      ctx.fillRect(imgX + ox + c, imgY + oy + r, 1, 1);
+    }
+  }
+}
+
+// Fancy path: bake wappen onto the pre-rendered sprite canvas so it inherits
+// shadow, sway and zoom transforms automatically.
+function _drawWappenOnSprite(sCtx, spriteSize, type, pieceColor = 0) {
+  const isKing = type === "00";
+  const wd = wappenByColor[pieceColor] || wappenData;
+  const data = isKing ? wd.king  : wd.piece;
+  const mask = isKing ? WAPPEN_MASK_KING : WAPPEN_MASK_PIECE;
+  const cols = isKing ? WAPPEN_KING_COLS : WAPPEN_PIECE_COLS;
+  const rows = isKing ? WAPPEN_KING_ROWS : WAPPEN_PIECE_ROWS;
+  const px   = Math.max(1, Math.round(spriteSize / CELL));
+  const scale = spriteSize / CELL;
+  const { ox, oy } = _wappenOffset(type, cols, rows, px, scale);
+  sCtx.imageSmoothingEnabled = false;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (!mask[r][c]) continue;
+      const color = data[r][c];
+      if (!color) continue;
+      sCtx.fillStyle = color;
+      sCtx.fillRect(ox + c * px, oy + r * px, px, px);
+    }
+  }
+}
+
+function initWappenEditor() {
+  const overlay  = document.getElementById("wappen-config");
+  const openBtn  = document.getElementById("wappen-config-btn");
+  const closeBtn = document.getElementById("wc-close");
+  const svCanvas  = document.getElementById("wc-sv");
+  const hueCanvas = document.getElementById("wc-hue");
+  const hexInput  = document.getElementById("wc-hex");
+  const previewEl = document.getElementById("wc-preview");
+  const eraserBtn = document.getElementById("wc-eraser");
+  const kingCanvas  = document.getElementById("wc-king");
+  const pieceCanvas = document.getElementById("wc-piece");
+
+  const svCtx    = svCanvas.getContext("2d");
+  const hueCtx   = hueCanvas.getContext("2d");
+  const kingCtx  = kingCanvas.getContext("2d");
+  const pieceCtx = pieceCanvas.getContext("2d");
+
+  // ── Picker state ────────────────────────────────────────────
+  let pH = 0, pS = 1, pV = 0.5, erasing = false;
+
+  function hsv2rgb(h, s, v) {
+    const c = v*s, x = c*(1-Math.abs((h/60)%2-1)), m = v-c;
+    let r,g,b;
+    if      (h<60)  {r=c;g=x;b=0;}
+    else if (h<120) {r=x;g=c;b=0;}
+    else if (h<180) {r=0;g=c;b=x;}
+    else if (h<240) {r=0;g=x;b=c;}
+    else if (h<300) {r=x;g=0;b=c;}
+    else            {r=c;g=0;b=x;}
+    return [Math.round((r+m)*255), Math.round((g+m)*255), Math.round((b+m)*255)];
+  }
+  function rgb2hsv(r,g,b) {
+    r/=255;g/=255;b/=255;
+    const max=Math.max(r,g,b),min=Math.min(r,g,b),d=max-min;
+    let h=0,s=max?d/max:0,v=max;
+    if(d){if(max===r)h=((g-b)/d+6)%6;else if(max===g)h=(b-r)/d+2;else h=(r-g)/d+4;h*=60;}
+    return [h,s,v];
+  }
+  function currentHex() {
+    const [r,g,b] = hsv2rgb(pH,pS,pV);
+    return '#'+[r,g,b].map(v=>v.toString(16).padStart(2,'0')).join('');
+  }
+  function updatePreview() {
+    if (erasing) {
+      previewEl.style.background = "repeating-conic-gradient(#3a2a4a 0% 25%,#1a1422 0% 50%)";
+      previewEl.style.backgroundSize = "10px 10px";
+    } else {
+      previewEl.style.background = currentHex();
+      previewEl.style.backgroundSize = "";
+    }
+    if (!erasing) hexInput.value = currentHex().toUpperCase();
+  }
+
+  // ── SV square ───────────────────────────────────────────────
+  function drawSV() {
+    const w=svCanvas.width, h=svCanvas.height;
+    const [hr,hg,hb] = hsv2rgb(pH,1,1);
+    const gH = svCtx.createLinearGradient(0,0,w,0);
+    gH.addColorStop(0,'#fff'); gH.addColorStop(1,`rgb(${hr},${hg},${hb})`);
+    svCtx.fillStyle = gH; svCtx.fillRect(0,0,w,h);
+    const gV = svCtx.createLinearGradient(0,0,0,h);
+    gV.addColorStop(0,'rgba(0,0,0,0)'); gV.addColorStop(1,'rgba(0,0,0,1)');
+    svCtx.fillStyle = gV; svCtx.fillRect(0,0,w,h);
+    // crosshair cursor
+    const cx=pS*w, cy=(1-pV)*h;
+    svCtx.beginPath(); svCtx.arc(cx,cy,5,0,Math.PI*2);
+    svCtx.strokeStyle='#fff'; svCtx.lineWidth=2; svCtx.stroke();
+    svCtx.beginPath(); svCtx.arc(cx,cy,5,0,Math.PI*2);
+    svCtx.strokeStyle='rgba(0,0,0,0.6)'; svCtx.lineWidth=1; svCtx.stroke();
+  }
+  // ── Hue strip ───────────────────────────────────────────────
+  function drawHue() {
+    const w=hueCanvas.width, h=hueCanvas.height;
+    const g=hueCtx.createLinearGradient(0,0,w,0);
+    for(let i=0;i<=6;i++) g.addColorStop(i/6,`hsl(${i*60},100%,50%)`);
+    hueCtx.fillStyle=g; hueCtx.fillRect(0,0,w,h);
+    const cx=pH/360*w;
+    hueCtx.strokeStyle='#fff'; hueCtx.lineWidth=2;
+    hueCtx.beginPath(); hueCtx.moveTo(cx,0); hueCtx.lineTo(cx,h); hueCtx.stroke();
+    hueCtx.strokeStyle='rgba(0,0,0,0.4)'; hueCtx.lineWidth=1;
+    hueCtx.beginPath(); hueCtx.moveTo(cx,0); hueCtx.lineTo(cx,h); hueCtx.stroke();
+  }
+  function redrawPicker() { drawSV(); drawHue(); updatePreview(); }
+
+  // ── Drag helper ─────────────────────────────────────────────
+  function addDrag(el, fn) {
+    let down=false;
+    el.addEventListener("pointerdown",e=>{down=true;el.setPointerCapture(e.pointerId);fn(e);});
+    el.addEventListener("pointermove",e=>{if(down)fn(e);});
+    el.addEventListener("pointerup",()=>{down=false;});
+  }
+  addDrag(svCanvas, e=>{
+    const r=svCanvas.getBoundingClientRect();
+    pS=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));
+    pV=Math.max(0,Math.min(1,1-(e.clientY-r.top)/r.height));
+    erasing=false; eraserBtn.classList.remove("wc-eraser-on");
+    redrawPicker();
+  });
+  addDrag(hueCanvas, e=>{
+    const r=hueCanvas.getBoundingClientRect();
+    pH=Math.max(0,Math.min(359.99,(e.clientX-r.left)/r.width*360));
+    erasing=false; eraserBtn.classList.remove("wc-eraser-on");
+    redrawPicker();
+  });
+  hexInput.addEventListener("input", ()=>{
+    const v=hexInput.value.trim();
+    if(/^#[0-9a-fA-F]{6}$/.test(v)){
+      [pH,pS,pV]=rgb2hsv(parseInt(v.slice(1,3),16),parseInt(v.slice(3,5),16),parseInt(v.slice(5,7),16));
+      erasing=false; eraserBtn.classList.remove("wc-eraser-on");
+      redrawPicker();
+    }
+  });
+  eraserBtn.addEventListener("click",()=>{
+    erasing=!erasing;
+    eraserBtn.classList.toggle("wc-eraser-on",erasing);
+    updatePreview();
+  });
+
+  // ── Drawing canvases ────────────────────────────────────────
+  const CELL_PX = 30; // editor grid cell size in CSS px (large = easy to click tiny grids)
+
+  function redrawGrid(ctx, canvas, data, mask, cols, rows) {
+    const w=cols*CELL_PX, h=rows*CELL_PX;
+    if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}
+    ctx.clearRect(0,0,w,h);
+    for(let r=0;r<rows;r++){
+      for(let c=0;c<cols;c++){
+        const x=c*CELL_PX, y=r*CELL_PX;
+        if(!mask[r][c]){
+          // Disabled: dark checkerboard
+          ctx.fillStyle=(r+c)%2===0?"#1e1828":"#171220";
+          ctx.fillRect(x,y,CELL_PX,CELL_PX);
+        } else {
+          ctx.fillStyle=data[r][c]||"#2a2035";
+          ctx.fillRect(x,y,CELL_PX,CELL_PX);
+        }
+        // Grid line
+        ctx.strokeStyle="rgba(0,0,0,0.55)";
+        ctx.lineWidth=0.75;
+        ctx.strokeRect(x+0.375,y+0.375,CELL_PX-0.75,CELL_PX-0.75);
+      }
+    }
+  }
+  function redrawEditors() {
+    redrawGrid(kingCtx, kingCanvas, wappenData.king,  WAPPEN_MASK_KING,  WAPPEN_KING_COLS,  WAPPEN_KING_ROWS);
+    redrawGrid(pieceCtx,pieceCanvas,wappenData.piece, WAPPEN_MASK_PIECE, WAPPEN_PIECE_COLS, WAPPEN_PIECE_ROWS);
+  }
+
+  function paintCell(canvas, data, mask, cols, rows, cx, cy) {
+    const rect=canvas.getBoundingClientRect();
+    const c=Math.floor((cx-rect.left)/rect.width*cols);
+    const r=Math.floor((cy-rect.top)/rect.height*rows);
+    if(c<0||c>=cols||r<0||r>=rows||!mask[r][c]) return;
+    const color = erasing ? null : currentHex();
+    if(data[r][c]===color) return;
+    data[r][c]=color;
+    saveWappen(); redrawEditors(); drawAll();
+  }
+  addDrag(kingCanvas,  e=>paintCell(kingCanvas, wappenData.king, WAPPEN_MASK_KING,
+    WAPPEN_KING_COLS, WAPPEN_KING_ROWS, e.clientX, e.clientY));
+  addDrag(pieceCanvas, e=>paintCell(pieceCanvas,wappenData.piece,WAPPEN_MASK_PIECE,
+    WAPPEN_PIECE_COLS,WAPPEN_PIECE_ROWS,e.clientX,e.clientY));
+
+  document.getElementById("wc-clear-king").addEventListener("click",()=>{
+    wappenData.king=Array.from({length:WAPPEN_KING_ROWS},()=>Array(WAPPEN_KING_COLS).fill(null));
+    saveWappen();redrawEditors();drawAll();
+  });
+  document.getElementById("wc-clear-piece").addEventListener("click",()=>{
+    wappenData.piece=Array.from({length:WAPPEN_PIECE_ROWS},()=>Array(WAPPEN_PIECE_COLS).fill(null));
+    saveWappen();redrawEditors();drawAll();
+  });
+
+  // ── Open / close ────────────────────────────────────────────
+  function open() {
+    redrawEditors(); redrawPicker();
+    overlay.classList.remove("hidden");
+    requestAnimationFrame(()=>requestAnimationFrame(()=>overlay.classList.add("visible")));
+  }
+  function close() {
+    overlay.classList.remove("visible");
+    overlay.addEventListener("transitionend",()=>overlay.classList.add("hidden"),{once:true});
+  }
+  openBtn.addEventListener("click", open);
+  closeBtn.addEventListener("click", close);
+  overlay.addEventListener("click", e=>{ if(e.target===overlay) close(); });
+}
+
 // Hotbar Configuration (start-screen picker, persisted to localStorage)
 // ============================================================
-const HC_STORAGE_KEY = "tnm_hotbar_v1";
+const HC_STORAGE_KEY   = "tnm_hotbar_v1";      // P1 (keeps backward-compat)
+const HC_STORAGE_KEY_P2 = "tnm_hotbar_p2_v1"; // P2
 const HC_TYPES = ["01", "02", "03", "04", "05", "10", "11", "12"];
 const HC_NAMES = {
   "01": "Pawn", "02": "Bishop", "03": "Knight",
@@ -2486,9 +2843,10 @@ const HC_DESCRIPTIONS = {
   "12": "Queen move,\njumps over piece",
 };
 
-function loadCustomHotbar() {
+function loadCustomHotbar(player = 0) {
+  const key = player === 1 ? HC_STORAGE_KEY_P2 : HC_STORAGE_KEY;
   try {
-    const raw = localStorage.getItem(HC_STORAGE_KEY);
+    const raw = localStorage.getItem(key);
     if (raw) {
       const arr = JSON.parse(raw);
       if (Array.isArray(arr) && arr.length === 4 && arr.every(t => HC_TYPES.includes(t))) return arr;
@@ -2497,8 +2855,9 @@ function loadCustomHotbar() {
   return ["01", "02", "03", "04"]; // sensible default
 }
 
-function saveCustomHotbar(arr) {
-  try { localStorage.setItem(HC_STORAGE_KEY, JSON.stringify(arr)); } catch (_) {}
+function saveCustomHotbar(arr, player = 0) {
+  const key = player === 1 ? HC_STORAGE_KEY_P2 : HC_STORAGE_KEY;
+  try { localStorage.setItem(key, JSON.stringify(arr)); } catch (_) {}
 }
 
 function initHotbarConfig() {
@@ -2508,20 +2867,42 @@ function initHotbarConfig() {
   const randomBtn = document.getElementById("hc-random-btn");
   const gallery   = document.getElementById("hc-gallery");
   const slotsEl   = document.getElementById("hc-slots");
+  const tabP1     = document.getElementById("hc-tab-p1");
+  const tabP2     = document.getElementById("hc-tab-p2");
 
-  let hotbar   = loadCustomHotbar();   // working copy
-  let selected = null;                 // piece type chosen in gallery
+  let activePlayer = 0;                        // 0 = P1, 1 = P2
+  let hotbar   = loadCustomHotbar(activePlayer); // working copy
+  let selected = null;                           // piece type chosen in gallery
+
+  function switchTab(player) {
+    saveCustomHotbar(hotbar, activePlayer);   // save current before switching
+    state.hotbars[activePlayer] = [...hotbar];
+    activePlayer = player;
+    hotbar   = loadCustomHotbar(activePlayer);
+    selected = null;
+    tabP1.classList.toggle("hc-tab-active", player === 0);
+    tabP2.classList.toggle("hc-tab-active", player === 1);
+    overlay.querySelector(".hc-panel").classList.toggle("hc-p2", player === 1);
+    render();
+  }
+  tabP1.addEventListener("click", () => { Sounds.play("click"); switchTab(0); });
+  tabP2.addEventListener("click", () => { Sounds.play("click"); switchTab(1); });
 
   function open() {
-    hotbar   = loadCustomHotbar();
+    activePlayer = 0;
+    hotbar   = loadCustomHotbar(0);
     selected = null;
+    tabP1.classList.add("hc-tab-active");
+    tabP2.classList.remove("hc-tab-active");
+    overlay.querySelector(".hc-panel").classList.remove("hc-p2");
     render();
     overlay.classList.remove("hidden");
     requestAnimationFrame(() => requestAnimationFrame(() => overlay.classList.add("visible")));
   }
 
   function close() {
-    saveCustomHotbar(hotbar);
+    saveCustomHotbar(hotbar, activePlayer);
+    state.hotbars[activePlayer] = [...hotbar];
     overlay.classList.remove("visible");
     overlay.addEventListener("transitionend", () => overlay.classList.add("hidden"), { once: true });
   }
@@ -2535,7 +2916,7 @@ function initHotbarConfig() {
       tile.className = "hc-tile" + (selected === type ? " hc-selected" : "");
 
       const img = document.createElement("img");
-      img.src = `images/figures/0${type}0.png`;
+      img.src = `images/figures/${activePlayer}${type}0.png`;
       img.alt = HC_NAMES[type];
 
       const name = document.createElement("div");
@@ -2550,11 +2931,17 @@ function initHotbarConfig() {
       desc.className = "hc-tile-desc";
       desc.textContent = HC_DESCRIPTIONS[type] || "";
 
+      tile.draggable = true;
       tile.append(img, name, cost, desc);
       tile.addEventListener("click", () => {
+        Sounds.play("click");
         selected = (selected === type) ? null : type;
         renderGallery();
-        renderSlots(); // update drop-target highlights
+        renderSlots();
+      });
+      tile.addEventListener("dragstart", e => {
+        e.dataTransfer.setData("hc-type", type);
+        e.dataTransfer.effectAllowed = "copy";
       });
       gallery.appendChild(tile);
     }
@@ -2572,7 +2959,7 @@ function initHotbarConfig() {
       num.textContent = "Slot " + (i + 1);
 
       const img = document.createElement("img");
-      img.src = `images/figures/0${type}0.png`;
+      img.src = `images/figures/${activePlayer}${type}0.png`;
       img.alt = HC_NAMES[type];
 
       const cost = document.createElement("div");
@@ -2580,7 +2967,26 @@ function initHotbarConfig() {
       cost.textContent = PIECE_INFO[type].cost + " ⚙";
 
       slot.append(num, img, cost);
+      slot.addEventListener("dragover", e => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        slot.classList.add("hc-drag-over");
+      });
+      slot.addEventListener("dragleave", () => slot.classList.remove("hc-drag-over"));
+      slot.addEventListener("drop", e => {
+        e.preventDefault();
+        slot.classList.remove("hc-drag-over");
+        const type = e.dataTransfer.getData("hc-type");
+        if (!type) return;
+        Sounds.play("select");
+        hotbar[i] = type;
+        selected = null;
+        slot.classList.add("hc-bounce");
+        slot.addEventListener("animationend", () => slot.classList.remove("hc-bounce"), { once: true });
+        render();
+      });
       slot.addEventListener("click", () => {
+        Sounds.play("click");
         if (selected) {
           // Assign the selected piece to this slot
           hotbar[i] = selected;
@@ -2607,6 +3013,8 @@ function initHotbarConfig() {
     hotbar = generateHotbar();
     selected = null;
     render();
+    saveCustomHotbar(hotbar, activePlayer);
+    state.hotbars[activePlayer] = [...hotbar];
   });
 
   // Close on backdrop click
@@ -2623,14 +3031,36 @@ async function main() {
   hotbarCanvas.addEventListener("pointermove", onHotbarHoverMove);
   hotbarCanvas.addEventListener("pointerleave", () => _clearHotbarHoverZoom());
   document.getElementById("finish-btn").addEventListener("click", onFinishClicked);
-  document.getElementById("restart-btn").addEventListener("click", resetGame);
+  document.getElementById("restart-btn").addEventListener("click", () => {
+    // Online mode is intercepted by online.js (capture listener fires first)
+    // Local mode: fly all buttons back up and return to start screen
+    resetGame();
+    document.getElementById("stage-wrapper").classList.remove("visible");
+
+    const startScreen = document.getElementById("start-screen");
+    startScreen.classList.remove("hidden");
+    startScreen.style.opacity      = "";
+    startScreen.style.pointerEvents = "";
+
+    const btnIds = ["play-btn", "play-online-btn", "hotbar-config-btn", "wappen-config-btn"];
+    requestAnimationFrame(() => {
+      for (const id of btnIds) document.getElementById(id).classList.remove("fly-down");
+      requestAnimationFrame(() => {
+        for (const id of btnIds) {
+          const b = document.getElementById(id);
+          b.classList.add("fly-up");
+          b.addEventListener("animationend", () => b.classList.remove("fly-up"), { once: true });
+        }
+      });
+    });
+  });
 
   const resignModal   = document.getElementById("resign-modal");
   const resignConfirm = document.getElementById("resign-confirm-btn");
   const resignCancel  = document.getElementById("resign-cancel-btn");
 
   document.getElementById("resign-btn").addEventListener("click", () => {
-    if (state.phase !== PH_PLAY) return;
+    if (state.phase === PH_END) return;
     resignModal.classList.remove("hidden");
   });
 
@@ -2640,7 +3070,7 @@ async function main() {
 
   resignConfirm.addEventListener("click", () => {
     resignModal.classList.add("hidden");
-    if (state.phase !== PH_PLAY) return;
+    if (state.phase === PH_END) return;
     if (state.online.active) {
       if (window.Online && Online.emitResign) Online.emitResign();
     } else {
@@ -2654,7 +3084,9 @@ async function main() {
     }
   });
 
-  // Hotbar config
+  // Wappen editor + Hotbar config
+  loadWappen();
+  initWappenEditor();
   initHotbarConfig();
 
   // Settings panel toggle
@@ -2682,6 +3114,7 @@ async function main() {
     let animating = false;
     el.addEventListener("click", () => {
       if (animating) return;
+      Sounds.play("click");
       animating = true;
       const forward   = !getValue();
       let frame       = forward ? 1 : FANCY_FRAMES;
@@ -2789,9 +3222,11 @@ async function main() {
     const startScreen   = document.getElementById("start-screen");
     const stageWrap     = document.getElementById("stage-wrapper");
 
-    // 1) Fly both buttons downward together
+    // 1) Fly all start-screen buttons downward together
     playBtn.classList.add("fly-down");
     playOnlineBtn.classList.add("fly-down");
+    document.getElementById("hotbar-config-btn").classList.add("fly-down");
+    document.getElementById("wappen-config-btn").classList.add("fly-down");
 
     playBtn.addEventListener("animationend", () => {
       // 2) Fade out the start screen overlay
