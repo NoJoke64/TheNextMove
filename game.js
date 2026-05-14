@@ -47,7 +47,8 @@ const HOTBAR_BORDER = 4;     // 4px Rand
 const HOTBAR_GAP = 14;       // 14px zwischen Slots
 const HOTBAR_SLOT_W = CELL;  // 23 — figure size
 
-const BUDGET = 20;
+const BUDGET      = 40;
+const STAR_BUDGET = 10;
 
 // Fancy Graphics mode — toggled via Settings panel
 // Board canvas renders at full native resolution (BOARD_W*scale × BOARD_H*scale).
@@ -156,6 +157,31 @@ let _dragCtx    = null;
 // ── Hover move-preview state (PH_PLAY: faint dots where hovered piece can go) ──
 let _hoverPreviewCell  = null;   // {row, col} of the piece being previewed
 let _hoverPreviewMoves = null;   // array of pseudo-move targets [{row,col,capture}, ...]
+
+// ── Piece tooltip (shown during setup when hovering opponent special pieces) ──
+let _tooltipEl    = null;   // lazily resolved DOM element
+let _lastMouseX   = 0;
+let _lastMouseY   = 0;
+function _getTooltipEl() {
+  if (!_tooltipEl) _tooltipEl = document.getElementById("piece-tooltip");
+  return _tooltipEl;
+}
+function _showPieceTooltip(text, cx, cy) {
+  const el = _getTooltipEl();
+  if (!el) return;
+  el.textContent = text;
+  // Position: prefer right of cursor, flip left if near right edge
+  const margin = 12;
+  const vw = window.innerWidth;
+  const left = (cx + margin + 220 < vw) ? cx + margin : cx - 220 - margin;
+  el.style.left = left + "px";
+  el.style.top  = (cy + 16) + "px";
+  el.classList.remove("hidden");
+}
+function _hidePieceTooltip() {
+  const el = _getTooltipEl();
+  if (el) el.classList.add("hidden");
+}
 
 // ── Sway helpers ──────────────────────────────────────────────
 // Deterministic per-cell noise so each piece has its own rhythm
@@ -550,12 +576,13 @@ const PIECE_INFO = {
   "04": { name: "Rook",         cost: 5, skins: 1  },
   "05": { name: "Queen",        cost: 9, skins: 6  },
   "06": { name: "Double Pawn",  cost: 1, skins: 10 },
-  "10": { name: "Blocker",      cost: 4, skins: 5  },
-  "11": { name: "Sumo Wrestler",cost: 5, skins: 1  },
+  "10": { name: "Blocker",      cost: 5, skins: 5  },
+  "11": { name: "Sumo Wrestler",cost: 6, skins: 1  },
   "12": { name: "Acrobat",      cost: 3, skins: 1  },
+  "20": { name: "Cannonball",   cost: 1, skins: 1  },
 };
 
-const HOTBAR_TYPES = ["01", "02", "03", "04", "05", "10", "11", "12"];
+const HOTBAR_TYPES = ["01", "02", "03", "04", "05", "10", "11", "12", "20"];
 
 const P1 = 0, P2 = 1;
 const PH_KING_PLACE = "kingPlace";
@@ -566,6 +593,7 @@ const PH_END        = "end";
 const FLIP_DURATION_MS = 600;
 const DRAG_THRESHOLD_PX = 5;
 const PIECE_VISUAL_OFFSET_Y = -4;   // shift all rendered figures up by 4px
+const CANNON_ANIM_MS = 1000;         // cannonball travel animation duration
 const HOTBAR_INTERNAL_SCALE = 4;    // hotbar renders at 4x internal resolution
                                     // → selected scale 1.25 maps to clean 5x integer pixels
 
@@ -618,6 +646,7 @@ const state = {
   viewFlipped: false,
   board: createEmptyBoard(),
   budgets: [BUDGET, BUDGET],
+  stars:   [STAR_BUDGET, STAR_BUDGET],
   hotbars: [[], []],
   selectedHotbarIdx: [null, null],
   selectedSquare: null,
@@ -627,6 +656,7 @@ const state = {
   scale: 3,
   animating: false,
   flipAnim: null,
+  cannonAnim: null,   // { fromX,fromY,toX,toY,toRow,toCol,startTime } during cannonball move
   message: "",
   winner: null,
 
@@ -665,6 +695,7 @@ function makePiece(color, type, skin = null) {
 }
 
 function pieceFile(p) {
+  if (p.type === "20") return "images/figures/2000.png";
   return `images/figures/${p.color}${p.type}${p.skin}.png`;
 }
 
@@ -697,6 +728,8 @@ async function preload() {
       list.push(`images/figures/1${t}${s}.png`);
     }
   }
+  // Cannonball animation frames (shared for both colors)
+  for (let f = 0; f < 4; f++) list.push(`images/figures/200${f}.png`);
   await Promise.allSettled(list.map(loadImage));
   // Wait for the pixel font so canvas text uses it
   if (document.fonts && document.fonts.ready) {
@@ -774,6 +807,7 @@ function canPlacePieceAt(player, row, col) {
   return true;
 }
 function canAffordAny(player) {
+  if (state.stars[player] <= 0) return false;
   const hotbar = state.hotbars[player];
   if (!hotbar || hotbar.length === 0) return false;
   let min = Infinity;
@@ -904,17 +938,37 @@ function pseudoMoves(board, row, col, enPassant = null) {
       break;
     }
 
-    // ── Blocker ("10"): Turm-Züge, kann nicht schlagen und nicht geschlagen werden
+    // ── Blocker ("10"): Turm-Züge; schlägt NUR direkt angrenzende Feinde (1 Schritt)
     case "10": {
-      const dirs10 = [[1,0],[-1,0],[0,1],[0,-1]];
+      // Bewegt sich wie ein König: 1 Schritt in alle 8 Richtungen
+      const dirs10 = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
       for (const [dr, dc] of dirs10) {
-        let r = row + dr, c = col + dc;
-        while (inBounds(r, c)) {
-          if (board[r][c]) break;          // blockiert von jeder Figur
-          push(r, c, false);               // nur leere Felder
-          r += dr; c += dc;
-        }
+        const r = row + dr, c = col + dc;
+        if (!inBounds(r, c)) continue;
+        const t = board[r][c];
+        if (!t) push(r, c, false);
+        else if (t.color !== p.color) push(r, c, true);
       }
+      break;
+    }
+
+    // ── Kanonkugel ("20"): rollt vorwärts bis zum letzten freien Feld (oder schlägt erste Figur)
+    case "20": {
+      const dir20 = pawnDir(p.color);
+      let r20 = row + dir20;
+      let lastEmpty20 = null;
+      while (inBounds(r20, col)) {
+        const t = board[r20][col];
+        if (t) {
+          // Erste Figur: Schlag wenn Feind (und nicht Blocker-immun gegen gerade Angriffe)
+          if (t.color !== p.color && !isBlocker(t)) push(r20, col, true);
+          break;
+        }
+        lastEmpty20 = { row: r20, col };
+        r20 += dir20;
+      }
+      // Muss bis zum letzten freien Feld rollen
+      if (lastEmpty20) push(lastEmpty20.row, lastEmpty20.col, false);
       break;
     }
 
@@ -1112,6 +1166,7 @@ function renderCapturedPieces() {
       const img = document.createElement("img");
       img.src = pieceFile(p);
       img.alt = "";
+      if (p.type === "20") img.classList.add("captured-cannon");
       container.appendChild(img);
     }
     _capturedRendered[color] = list.length;
@@ -1144,6 +1199,17 @@ function drawBoard() {
       const img = images[pieceFile(p)];
       if (!img) continue;
 
+      // ── Kanonkugel: mittig, unten (Kugel auf normaler Figurhöhe, Rauch nach unten)
+      if (p.type === "20") {
+        // Während Animation: am Zielfeld nicht zeichnen (wird animiert dargestellt)
+        if (state.cannonAnim && state.cannonAnim.toRow === r && state.cannonAnim.toCol === c) continue;
+        boardCtx.save();
+        boardCtx.imageSmoothingEnabled = false;
+        boardCtx.drawImage(img, x + Math.floor((CELL - 12) / 2) + 0.5, y + PIECE_VISUAL_OFFSET_Y + 10, 12, 33);
+        boardCtx.restore();
+        continue;
+      }
+
       const imgX = x;
       const imgY = y + PIECE_VISUAL_OFFSET_Y;
       const _zoomProg  = doHoverZoom ? (_boardZoomMap.get(`${r},${c}`) || 0) : 0;
@@ -1164,7 +1230,7 @@ function drawBoard() {
         sCtx.drawImage(img, 0, 0, spriteSize, spriteSize);
 
         // Bake wappen directly onto sprite canvas (inherits shadow/sway/zoom)
-        _drawWappenOnSprite(sCtx, spriteSize, p.type, p.color);
+        _drawWappenOnSprite(sCtx, spriteSize, p.type, p.color, p.skin);
 
         // 2. Composite the sprite canvas onto the board canvas WITH smoothing so
         //    any transforms (sway, zoom) benefit from bilinear filtering.
@@ -1212,9 +1278,44 @@ function drawBoard() {
         // ── Non-fancy path: nearest-neighbour direct draw ─────────────────────
         boardCtx.drawImage(img, imgX, imgY);
         // Wappen on non-fancy path (no sprite canvas — draw directly in logical px)
-        drawWappenOnPiece(boardCtx, imgX, imgY, p.type, p.color);
+        drawWappenOnPiece(boardCtx, imgX, imgY, p.type, p.color, p.skin);
       }
 
+      boardCtx.restore();
+    }
+  }
+
+  // ── Geschlagene Figur während Kanonkugel-Animation ──────────────────────────
+  // Bleibt sichtbar bis die Kugel ankommt (dann erst ins Grab)
+  if (state.cannonAnim && state.cannonAnim.capturedPiece) {
+    const cp = state.cannonAnim.capturedPiece;
+    const { x: cpX, y: cpY } = cellToCanvas(state.cannonAnim.toRow, state.cannonAnim.toCol);
+    const cpImg = images[pieceFile(cp)];
+    if (cpImg) {
+      boardCtx.save();
+      boardCtx.imageSmoothingEnabled = false;
+      if (cp.type === "20") {
+        boardCtx.drawImage(cpImg, cpX + Math.floor((CELL - 12) / 2) + 0.5, cpY + PIECE_VISUAL_OFFSET_Y + 10, 12, 33);
+      } else {
+        boardCtx.drawImage(cpImg, cpX, cpY + PIECE_VISUAL_OFFSET_Y);
+      }
+      boardCtx.restore();
+    }
+  }
+
+  // ── Animated Kanonkugel ─────────────────────────────────────────────────────
+  if (state.cannonAnim) {
+    const anim = state.cannonAnim;
+    const elapsed = performance.now() - anim.startTime;
+    const prog = Math.min(elapsed / CANNON_ANIM_MS, 1);
+    const px = anim.fromX + (anim.toX - anim.fromX) * prog;
+    const py = anim.fromY + (anim.toY - anim.fromY) * prog;
+    const frame = Math.min(Math.floor(prog * 4), 3);
+    const cImg = images[`images/figures/200${frame}.png`];
+    if (cImg) {
+      boardCtx.save();
+      boardCtx.imageSmoothingEnabled = false;
+      boardCtx.drawImage(cImg, px + Math.floor((CELL - 12) / 2), py + PIECE_VISUAL_OFFSET_Y, 12, 33);
       boardCtx.restore();
     }
   }
@@ -1266,8 +1367,13 @@ function drawBoard() {
           boardCtx.save();
           try { boardCtx.filter = "saturate(50%)"; } catch (e) {}
           boardCtx.globalAlpha = 0.5;
-          boardCtx.drawImage(img, x, y + PIECE_VISUAL_OFFSET_Y);
-          drawWappenOnPiece(boardCtx, x, y + PIECE_VISUAL_OFFSET_Y, previewPiece.type, previewPiece.color);
+          if (previewPiece.type === "20") {
+            boardCtx.imageSmoothingEnabled = false;
+            boardCtx.drawImage(img, x + Math.floor((CELL - 12) / 2) + 0.5, y + PIECE_VISUAL_OFFSET_Y + 10, 12, 33);
+          } else {
+            boardCtx.drawImage(img, x, y + PIECE_VISUAL_OFFSET_Y);
+            drawWappenOnPiece(boardCtx, x, y + PIECE_VISUAL_OFFSET_Y, previewPiece.type, previewPiece.color, previewPiece.skin);
+          }
           boardCtx.restore();
         }
       }
@@ -1377,10 +1483,8 @@ function _drawDragCanvas() {
 
   if (img) {
     _dragCtx.save();
-    _dragCtx.imageSmoothingEnabled = true;
-    _dragCtx.imageSmoothingQuality = "high";
 
-    // Drag tilt — rotate around the upper-quarter pivot
+    // Drag tilt — rotate around the cursor point
     if (dragTilt) {
       const angleDeg = Math.max(-DRAG_TILT_MAX,
                        Math.min( DRAG_TILT_MAX, _dragTiltVX * DRAG_TILT_SCALE));
@@ -1400,19 +1504,33 @@ function _drawDragCanvas() {
       _dragCtx.shadowOffsetY = pixelShadows ? 10 : 6;
     }
 
-    // Pre-render via sprite canvas for sharp nearest-neighbour source
-    if (fancyGraphics) {
-      const spriteSize = Math.ceil(CELL * s * dpr);
-      const sCtx = _getSpriteCanvas(spriteSize);
-      sCtx.clearRect(0, 0, spriteSize, spriteSize);
-      sCtx.imageSmoothingEnabled = false;
-      sCtx.drawImage(img, 0, 0, spriteSize, spriteSize);
-      _drawWappenOnSprite(sCtx, spriteSize, dragPiece.type, dragPiece.color);
-      _dragCtx.drawImage(_spriteCanvas, imgX, imgY, CELL, CELL);
-    } else {
+    if (dragPiece.type === "20") {
+      // Kanonkugel: natürliche Größe 12×33, zentriert auf Cursor (gleicher Offset wie auf Board)
       _dragCtx.imageSmoothingEnabled = false;
-      _dragCtx.drawImage(img, imgX, imgY);
-      drawWappenOnPiece(_dragCtx, imgX, imgY, dragPiece.type, dragPiece.color);
+      _dragCtx.shadowColor   = "rgba(0,0,0,1.0)";
+      _dragCtx.shadowBlur    = 18;
+      _dragCtx.shadowOffsetX = 2;
+      _dragCtx.shadowOffsetY = 8;
+      const cX = lx - 6 + 0.5;
+      const cY = ly - 6;  // Kugel (top 12px) zentriert auf Cursor
+      _dragCtx.drawImage(img, cX, cY, 12, 33);
+    } else {
+      _dragCtx.imageSmoothingEnabled = true;
+      _dragCtx.imageSmoothingQuality = "high";
+      // Pre-render via sprite canvas for sharp nearest-neighbour source
+      if (fancyGraphics) {
+        const spriteSize = Math.ceil(CELL * s * dpr);
+        const sCtx = _getSpriteCanvas(spriteSize);
+        sCtx.clearRect(0, 0, spriteSize, spriteSize);
+        sCtx.imageSmoothingEnabled = false;
+        sCtx.drawImage(img, 0, 0, spriteSize, spriteSize);
+        _drawWappenOnSprite(sCtx, spriteSize, dragPiece.type, dragPiece.color, dragPiece.skin);
+        _dragCtx.drawImage(_spriteCanvas, imgX, imgY, CELL, CELL);
+      } else {
+        _dragCtx.imageSmoothingEnabled = false;
+        _dragCtx.drawImage(img, imgX, imgY);
+        drawWappenOnPiece(_dragCtx, imgX, imgY, dragPiece.type, dragPiece.color, dragPiece.skin);
+      }
     }
 
     _dragCtx.restore();
@@ -1506,6 +1624,18 @@ function updateHoverFromClient(clientX, clientY) {
     && !(!valid && !state.hoverCell);
 
   state.hoverCell = valid;
+
+  // ── Piece tooltip: show on opponent special pieces during setup ──
+  if (state.phase === PH_SETUP || state.phase === PH_KING_PLACE) {
+    const p = cell ? state.board[cell.row][cell.col] : null;
+    const opponentColor = state.online.active ? (1 - state.online.myColor) : (1 - state.current);
+    const desc = (p && p.color === opponentColor) ? PIECE_TOOLTIP_DESC[p.type] : null;
+    if (desc) _showPieceTooltip(desc, _lastMouseX, _lastMouseY);
+    else       _hidePieceTooltip();
+  } else {
+    _hidePieceTooltip();
+  }
+
   // Sway loop redraws continuously; only manual redraw when not sway-looping
   if ((validChanged || previewChanged) && (!fancyGraphics || !fancySway)) drawBoard();
 }
@@ -1634,7 +1764,25 @@ function drawHotbar() {
       hotbarCtx.translate(-cx, -cy);
     }
 
-    if (img) {
+    // ── Kanonkugel: eigene Darstellung (12×33, zentriert im Slot) ──────────────
+    if (type === "20") {
+      const cImg20 = images["images/figures/2000.png"];
+      if (cImg20) {
+        hotbarCtx.imageSmoothingEnabled = false;
+        if (doShadows) {
+          hotbarCtx.shadowColor   = "rgba(0,0,0,0.7)";
+          hotbarCtx.shadowBlur    = 4;
+          hotbarCtx.shadowOffsetX = 0;
+          hotbarCtx.shadowOffsetY = 3;
+        }
+        if (isSelected) {
+          hotbarCtx.translate(cx, cy);
+          hotbarCtx.scale(1.25, 1.25);
+          hotbarCtx.translate(-cx, -cy);
+        }
+        hotbarCtx.drawImage(cImg20, slotX + Math.floor((CELL - 12) / 2) + 0.5, o.y + 8, 12, 33);
+      }
+    } else if (img) {
       // ── Sprite canvas (nearest-neighbour source, smooth transform output) ──
       const sCtx = _getSpriteCanvas(spriteSize);
       sCtx.clearRect(0, 0, spriteSize, spriteSize);
@@ -1762,11 +1910,13 @@ function drawHotbarFigure(ctx, img, x, y, isSelected, alpha) {
 function drawHud() {
   const phaseLabel = document.getElementById("phase-label");
   const playerLabel = document.getElementById("player-label");
-  const coinValue = document.getElementById("coin-value");
+  const coinValue  = document.getElementById("coin-value");
+  const starValue  = document.getElementById("star-value");
   const finishBtn  = document.getElementById("finish-btn");
   const resignBtn  = document.getElementById("resign-btn");
   const messageEl  = document.getElementById("message");
   const coinLabel  = document.getElementById("coin-label");
+  const starLabel  = document.getElementById("star-label");
 
   phaseLabel.textContent = ({
     [PH_KING_PLACE]: "Place King",
@@ -1781,8 +1931,10 @@ function drawHud() {
   // Online: always show MY budget. Local: show current player's budget.
   const budgetPlayer = state.online.active ? state.online.myColor : state.current;
   coinValue.textContent = state.budgets[budgetPlayer];
-  // Coins are only relevant during setup
+  if (starValue) starValue.textContent = state.stars[budgetPlayer];
+  // Coins and stars are only relevant during setup
   if (coinLabel) coinLabel.style.visibility = (state.phase === PH_SETUP) ? "" : "hidden";
+  if (starLabel) starLabel.style.visibility = (state.phase === PH_SETUP) ? "" : "hidden";
 
   if (state.phase === PH_SETUP) {
     finishBtn.classList.remove("hidden");
@@ -2045,7 +2197,8 @@ function onPointerMove(evt) {
 }
 
 function onBoardHoverMove(evt) {
-  // Independent from drag: keep hover updated even when no pointer is down
+  _lastMouseX = evt.clientX;
+  _lastMouseY = evt.clientY;
   updateHoverFromClient(evt.clientX, evt.clientY);
 }
 
@@ -2074,6 +2227,7 @@ function onBoardHoverLeave() {
   _hoverPreviewCell  = null;
   _hoverPreviewMoves = null;
   _clearBoardHoverZoom();
+  _hidePieceTooltip();
   if (needRedraw && (!fancyGraphics || !fancySway)) drawBoard();
 }
 
@@ -2132,9 +2286,11 @@ function handleDrop(ptr, clientX, clientY) {
       if (state.setupDone[player]) return;
       const type = ptr.payload.type;
       if (state.budgets[player] < PIECE_INFO[type].cost) return;
+      if (state.stars[player] <= 0) return;
       if (!canPlacePieceAt(player, cell.row, cell.col)) return;
       state.board[cell.row][cell.col] = makePiece(player, type);
       state.budgets[player] -= PIECE_INFO[type].cost;
+      state.stars[player]   -= 1;
       Sounds.play("place");
       if (state.online.active && window.Online) Online.emitPiecePlace(cell.row, cell.col, type, state.board[cell.row][cell.col].skin);
       recomputeSetupDoneAfterPlacement(player);
@@ -2152,9 +2308,12 @@ function handleDrop(ptr, clientX, clientY) {
     }
     const move = state.legalMoves.find(m => m.row === cell.row && m.col === cell.col);
     if (!move) return;
+    const movingType = state.board[from.row][from.col]?.type;
+    const isCannonDrop = movingType === "20";
+    const cannonCapture = isCannonDrop ? state.board[cell.row][cell.col] : null;
     state.enPassant = move.twoSquare ? { row: (from.row + move.row) / 2, col: move.col } : null;
     applyMoveOnBoard(state.board, from, cell, {
-      recordCapture: true, isEnPassant: move.isEnPassant,
+      recordCapture: !isCannonDrop, isEnPassant: move.isEnPassant,
       isPush: move.isPush,
       pushFromRow: move.pushFromRow, pushFromCol: move.pushFromCol,
       pushToRow:   move.pushToRow,   pushToCol:   move.pushToCol,
@@ -2163,6 +2322,7 @@ function handleDrop(ptr, clientX, clientY) {
     if (state.online.active && window.Online) Online.emitMove(from, cell);
     state.selectedSquare = null;
     state.legalMoves = [];
+    if (isCannonDrop) { _startCannonAnimation(from, cell, cannonCapture, () => endPlayTurn()); return; }
     endPlayTurn();
   }
 }
@@ -2186,9 +2346,11 @@ function handleBoardClick(row, col) {
     if (idx === null) return;
     const type = state.hotbars[player][idx];
     if (state.budgets[player] < PIECE_INFO[type].cost) return;
+    if (state.stars[player] <= 0) return;
     if (!canPlacePieceAt(player, row, col)) return;
     state.board[row][col] = makePiece(player, type);
     state.budgets[player] -= PIECE_INFO[type].cost;
+    state.stars[player]   -= 1;
     Sounds.play("place");
     if (state.online.active && window.Online) Online.emitPiecePlace(row, col, type, state.board[row][col].skin);
     recomputeSetupDoneAfterPlacement(player);
@@ -2201,9 +2363,12 @@ function handleBoardClick(row, col) {
     if (sel) {
       const move = state.legalMoves.find(m => m.row === row && m.col === col);
       if (move) {
+        const movingType2 = state.board[sel.row][sel.col]?.type;
+        const isCannonClick = movingType2 === "20";
+        const cannonCapture2 = isCannonClick ? state.board[row][col] : null;
         state.enPassant = move.twoSquare ? { row: (sel.row + move.row) / 2, col: move.col } : null;
         applyMoveOnBoard(state.board, sel, { row, col }, {
-          recordCapture: true, isEnPassant: move.isEnPassant,
+          recordCapture: !isCannonClick, isEnPassant: move.isEnPassant,
           isPush: move.isPush,
       pushFromRow: move.pushFromRow, pushFromCol: move.pushFromCol,
       pushToRow:   move.pushToRow,   pushToCol:   move.pushToCol,
@@ -2212,6 +2377,7 @@ function handleBoardClick(row, col) {
         if (state.online.active && window.Online) Online.emitMove(sel, { row, col });
         state.selectedSquare = null;
         state.legalMoves = [];
+        if (isCannonClick) { _startCannonAnimation(sel, { row, col }, cannonCapture2, () => endPlayTurn()); return; }
         endPlayTurn();
         return;
       }
@@ -2302,6 +2468,36 @@ function startPlay() {
     drawAll();
     checkGameOver();
   });
+}
+
+// ── Kanonkugel-Animation: smooth travel from A → B ───────────────────────────
+// capturedPiece: die geschlagene Figur (oder null) — wird erst am Ziel aus dem Spiel genommen
+function _startCannonAnimation(from, to, capturedPiece, onDone) {
+  const fromPos = cellToCanvas(from.row, from.col);
+  const toPos   = cellToCanvas(to.row,   to.col);
+  state.cannonAnim = {
+    fromX: fromPos.x, fromY: fromPos.y,
+    toX:   toPos.x,   toY:   toPos.y,
+    toRow: to.row, toCol: to.col,
+    capturedPiece,           // bleibt sichtbar bis Kugel ankommt
+    startTime: performance.now(),
+  };
+  state.animating = true;
+  function tick(now) {
+    if (!state.cannonAnim) return;
+    const progress = Math.min((now - state.cannonAnim.startTime) / CANNON_ANIM_MS, 1);
+    drawAll();
+    if (progress < 1) {
+      requestAnimationFrame(tick);
+    } else {
+      // Jetzt erst die geschlagene Figur ins Grab legen
+      if (capturedPiece) state.captured[capturedPiece.color].push({ ...capturedPiece });
+      state.cannonAnim = null;
+      state.animating = false;
+      onDone();
+    }
+  }
+  requestAnimationFrame(tick);
 }
 
 function endPlayTurn() {
@@ -2421,8 +2617,8 @@ function flipAnimFrame(now) {
     const y = item.from.y + (item.to.y - item.from.y) * e;
     const rx = Math.round(x), ry = Math.round(y);
     const img = images[pieceFile(item.p)];
-    if (img) boardCtx.drawImage(img, rx, ry);
-    drawWappenOnPiece(boardCtx, rx, ry, item.p.type, item.p.color);
+    if (img) boardCtx.drawImage(img, rx + (item.p.type === "20" ? Math.floor((CELL - 12) / 2) + 0.5 : 0), ry + (item.p.type === "20" ? PIECE_VISUAL_OFFSET_Y + 10 : 0));
+    if (item.p.type !== "20") drawWappenOnPiece(boardCtx, rx, ry, item.p.type, item.p.color, item.p.skin);
   }
 
   if (fancyGraphics && fancyGlow) {
@@ -2463,6 +2659,7 @@ function resetGame() {
   state.viewFlipped = false;
   state.board = createEmptyBoard();
   state.budgets = [BUDGET, BUDGET];
+  state.stars   = [STAR_BUDGET, STAR_BUDGET];
   state.hotbars = [loadCustomHotbar(0), loadCustomHotbar(1)];
   state.selectedHotbarIdx = [null, null];
   state.selectedSquare = null;
@@ -2471,6 +2668,7 @@ function resetGame() {
   state.setupDone = [false, false];
   state.animating = false;
   state.flipAnim = null;
+  state.cannonAnim = null;
   state.message = "";
   state.winner = null;
   state.pointer = null;
@@ -2575,12 +2773,19 @@ window.resetWappenByColor = function() {
 const WAPPEN_POS_X = { "00":9,"01":11,"02":10,"03":9,"04":10,"05":11,"06":11,"10":8,"11":11,"12":12 };
 const WAPPEN_POS_Y = { "00":12,"01":14,"02":14,"03":14,"04":11,"05":12,"06":16,"10":14,"11":18,"12":13 };
 
-function _wappenOffset(type, cols, rows, px, spriteScale) {
+// Per-skin overrides — key: "type_skin" — only needed where sprite layout differs
+const WAPPEN_POS_SKIN_X = { "05_5": 12 };
+const WAPPEN_POS_SKIN_Y = { "05_5": 14 };
+
+function _wappenOffset(type, cols, rows, px, spriteScale, skin) {
   // spriteScale: multiply logical px → sprite-canvas px (pass 1 for board-logical)
-  if (WAPPEN_POS_X[type] !== undefined) {
+  const skinKey = `${type}_${skin}`;
+  const posX = WAPPEN_POS_SKIN_X[skinKey] ?? WAPPEN_POS_X[type];
+  const posY = WAPPEN_POS_SKIN_Y[skinKey] ?? WAPPEN_POS_Y[type];
+  if (posX !== undefined) {
     return {
-      ox: Math.round(WAPPEN_POS_X[type] * spriteScale),
-      oy: Math.round(WAPPEN_POS_Y[type] * spriteScale),
+      ox: Math.round(posX * spriteScale),
+      oy: Math.round(posY * spriteScale),
     };
   }
   // Fallback: centered (used for King "00" and Acrobat "12")
@@ -2592,14 +2797,14 @@ function _wappenOffset(type, cols, rows, px, spriteScale) {
 }
 
 // Non-fancy path: draw in logical px directly on the board canvas
-function drawWappenOnPiece(ctx, imgX, imgY, type, pieceColor = 0) {
+function drawWappenOnPiece(ctx, imgX, imgY, type, pieceColor = 0, skin = 0) {
   const isKing = type === "00";
   const wd = wappenByColor[pieceColor] || wappenData;
   const data = isKing ? wd.king  : wd.piece;
   const mask = isKing ? WAPPEN_MASK_KING : WAPPEN_MASK_PIECE;
   const cols = isKing ? WAPPEN_KING_COLS : WAPPEN_PIECE_COLS;
   const rows = isKing ? WAPPEN_KING_ROWS : WAPPEN_PIECE_ROWS;
-  const { ox, oy } = _wappenOffset(type, cols, rows, 1, 1);
+  const { ox, oy } = _wappenOffset(type, cols, rows, 1, 1, skin);
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       if (!mask[r][c]) continue;
@@ -2613,7 +2818,7 @@ function drawWappenOnPiece(ctx, imgX, imgY, type, pieceColor = 0) {
 
 // Fancy path: bake wappen onto the pre-rendered sprite canvas so it inherits
 // shadow, sway and zoom transforms automatically.
-function _drawWappenOnSprite(sCtx, spriteSize, type, pieceColor = 0) {
+function _drawWappenOnSprite(sCtx, spriteSize, type, pieceColor = 0, skin = 0) {
   const isKing = type === "00";
   const wd = wappenByColor[pieceColor] || wappenData;
   const data = isKing ? wd.king  : wd.piece;
@@ -2622,7 +2827,7 @@ function _drawWappenOnSprite(sCtx, spriteSize, type, pieceColor = 0) {
   const rows = isKing ? WAPPEN_KING_ROWS : WAPPEN_PIECE_ROWS;
   const px   = Math.max(1, Math.round(spriteSize / CELL));
   const scale = spriteSize / CELL;
-  const { ox, oy } = _wappenOffset(type, cols, rows, px, scale);
+  const { ox, oy } = _wappenOffset(type, cols, rows, px, scale, skin);
   sCtx.imageSmoothingEnabled = false;
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
@@ -2826,21 +3031,31 @@ function initWappenEditor() {
 // ============================================================
 const HC_STORAGE_KEY   = "tnm_hotbar_v1";      // P1 (keeps backward-compat)
 const HC_STORAGE_KEY_P2 = "tnm_hotbar_p2_v1"; // P2
-const HC_TYPES = ["01", "02", "03", "04", "05", "10", "11", "12"];
+const HC_TYPES = ["01", "02", "03", "04", "05", "10", "11", "12", "20"];
 const HC_NAMES = {
   "01": "Pawn", "02": "Bishop", "03": "Knight",
   "04": "Rook", "05": "Queen",  "10": "Blocker", "11": "Sumo Wrestler",
   "12": "Acrobat",
 };
 const HC_DESCRIPTIONS = {
-  "01": "1 forward,\ncaptures diagonal",
-  "02": "Diagonal,\nany distance",
-  "03": "L-jump,\nleaps over",
-  "04": "Straight,\nany distance",
-  "05": "All directions,\nany distance",
-  "10": "Rook move,\nindestructible",
-  "11": "Rook move,\npushes pieces",
-  "12": "Queen move,\njumps over piece",
+  "01": "1 step fwd.\nCaptures diagonally",
+  "02": "Slides diagonally\nany distance",
+  "03": "L-shaped jump\nLeaps over pieces",
+  "04": "Slides straight\nany distance",
+  "05": "Slides in all\ndirections",
+  "10": "1 step in any direction\n(like a King).\nImmune to straight attacks",
+  "11": "1–2 steps straight\nor 1 diagonal.\nPushes pieces behind target",
+  "12": "Jumps over any piece\nlands 1 step beyond it",
+  "20": "Rolls straight forward\nto the last open square.\nCaptures 1st enemy at end",
+};
+
+// Tooltip shown on hover over opponent's special pieces during setup
+const PIECE_TOOLTIP_DESC = {
+  "06": "Double Pawn — moves 1–2 fwd, can lance through own piece to capture",
+  "10": "Blocker — moves 1 step in any direction (like a King), immune to straight attacks",
+  "11": "Sumo Wrestler — 1–2 straight or 1 diagonal, pushes the piece behind the target",
+  "12": "Acrobat — jumps over any piece and lands 1 step behind it",
+  "20": "Cannonball — rolls forward to the last open square, captures first enemy it hits",
 };
 
 function loadCustomHotbar(player = 0) {
@@ -2916,7 +3131,7 @@ function initHotbarConfig() {
       tile.className = "hc-tile" + (selected === type ? " hc-selected" : "");
 
       const img = document.createElement("img");
-      img.src = `images/figures/${activePlayer}${type}0.png`;
+      img.src = type === "20" ? "images/figures/2000.png" : `images/figures/${activePlayer}${type}0.png`;
       img.alt = HC_NAMES[type];
 
       const name = document.createElement("div");
@@ -2959,7 +3174,7 @@ function initHotbarConfig() {
       num.textContent = "Slot " + (i + 1);
 
       const img = document.createElement("img");
-      img.src = `images/figures/${activePlayer}${type}0.png`;
+      img.src = type === "20" ? "images/figures/2000.png" : `images/figures/${activePlayer}${type}0.png`;
       img.alt = HC_NAMES[type];
 
       const cost = document.createElement("div");

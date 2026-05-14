@@ -353,6 +353,7 @@
   function _applyOpponentPiecePlace(row, col, type, skin, color) {
     state.board[row][col] = { color, type, skin };
     state.budgets[color] -= PIECE_INFO[type]?.cost ?? 0;
+    if (state.stars[color] > 0) state.stars[color] -= 1;
     if (window.Sounds) Sounds.play("place");
     drawAll();
   }
@@ -360,10 +361,17 @@
   function _applyOpponentMove(fromRow, fromCol, toRow, toCol, isEnPassant, newEnPassant) {
     const from = { row: fromRow, col: fromCol };
     const to   = { row: toRow,   col: toCol   };
-    applyMoveOnBoard(state.board, from, to, { recordCapture: true, isEnPassant });
+    const movingType = state.board[fromRow][fromCol]?.type;
+    const isCannonball = movingType === "20";
+    const cannonCapture = isCannonball ? state.board[toRow][toCol] : null;
+    applyMoveOnBoard(state.board, from, to, { recordCapture: !isCannonball, isEnPassant });
     state.enPassant = newEnPassant || null;
     if (window.Sounds) Sounds.play("place");
-    drawAll();
+    if (isCannonball) {
+      _startCannonAnimation(from, to, cannonCapture, () => drawAll());
+    } else {
+      drawAll();
+    }
   }
 
   // ── Disconnect / forfeit handling ─────────────────────────

@@ -31,12 +31,14 @@ const PIECE_INFO = {
   "04": { cost: 5, skins: 1  },
   "05": { cost: 9, skins: 6  },
   "06": { cost: 1, skins: 10 },
-  "10": { cost: 4, skins: 5  },
-  "11": { cost: 5, skins: 1  },
+  "10": { cost: 5, skins: 5  },
+  "11": { cost: 6, skins: 1  },
   "12": { cost: 3, skins: 1  },
+  "20": { cost: 1, skins: 1  },
 };
-const HOTBAR_TYPES = ["01", "02", "03", "04", "05", "10", "11", "12"];
-const BUDGET = 20;
+const HOTBAR_TYPES = ["01", "02", "03", "04", "05", "10", "11", "12", "20"];
+const BUDGET      = 40;
+const STAR_BUDGET = 10;
 
 function createEmptyBoard() {
   const b = [];
@@ -158,6 +160,38 @@ function pseudoMoves(board, row, col, enPassant = null) {
     case "04": slide(board, row, col, p, [[1,0],[-1,0],[0,1],[0,-1]], push); break;
     case "05": slide(board, row, col, p, [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]], push); break;
 
+    // ── Blocker ("10"): Turm-Züge; schlägt NUR direkt angrenzende Feinde (1 Schritt)
+    case "10": {
+      // Bewegt sich wie ein König: 1 Schritt in alle 8 Richtungen
+      const dirs10 = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+      for (const [dr, dc] of dirs10) {
+        const r = row + dr, c = col + dc;
+        if (!inBounds(r, c)) continue;
+        const t = board[r][c];
+        if (!t) push(r, c, false);
+        else if (t.color !== p.color) push(r, c, true);
+      }
+      break;
+    }
+
+    // ── Kanonkugel ("20"): rollt vorwärts bis zum letzten freien Feld (+ optionaler Schlag)
+    case "20": {
+      const dir20 = pawnDir(p.color);
+      let r20 = row + dir20;
+      let lastEmpty20 = null;
+      while (inBounds(r20, col)) {
+        const t = board[r20][col];
+        if (t) {
+          if (t.color !== p.color && t.type !== "10") push(r20, col, true);
+          break;
+        }
+        lastEmpty20 = { row: r20, col };
+        r20 += dir20;
+      }
+      if (lastEmpty20) push(lastEmpty20.row, lastEmpty20.col, false);
+      break;
+    }
+
     // ── Akrobat ("12"): Dame-Richtungen, springt über erste Figur, landet dahinter
     case "12": {
       const dirs12 = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
@@ -250,7 +284,8 @@ function hasAnyLegalMove(board, color, enPassant = null) {
   return false;
 }
 
-function canAffordAnyServer(hotbar, budget) {
+function canAffordAnyServer(hotbar, budget, stars) {
+  if (stars <= 0) return false;
   for (const t of hotbar) {
     if (PIECE_INFO[t] && PIECE_INFO[t].cost <= budget) return true;
   }
@@ -303,6 +338,7 @@ function createGame(p1SocketId, p2SocketId, p1Name, p2Name) {
     phase:       PH_KING_PLACE,
     current:     P1,
     budgets:     [BUDGET, BUDGET],
+    stars:       [STAR_BUDGET, STAR_BUDGET],
     hotbars:     [hotbarP1, hotbarP2],
     kingsPlaced: [false, false],
     setupDone:   [false, false],
@@ -527,6 +563,7 @@ io.on("connection", socket => {
     if (g.setupDone[color]) return;
     if (!PIECE_INFO[type] || type === "00") return;
     if (g.budgets[color] < PIECE_INFO[type].cost) return;
+    if (g.stars[color] <= 0) return;
 
     const rows = ownHalfRows(color);
     if (!rows.includes(row)) return;
@@ -535,12 +572,13 @@ io.on("connection", socket => {
     const clampedSkin = (skin || 0) % PIECE_INFO[type].skins;
     g.board[row][col]  = { color, type, skin: clampedSkin };
     g.budgets[color]  -= PIECE_INFO[type].cost;
+    g.stars[color]    -= 1;
 
     const oppId = g.players[1 - color];
     io.to(oppId).emit("game:piece_placed", { color, row, col, type, skin: clampedSkin });
 
     // Check if this player is now broke → auto-done
-    if (!canAffordAnyServer(g.hotbars[color], g.budgets[color])) {
+    if (!canAffordAnyServer(g.hotbars[color], g.budgets[color], g.stars[color])) {
       g.setupDone[color] = true;
       io.to(g.players[P1]).emit("game:setup_finished", { color });
       io.to(g.players[P2]).emit("game:setup_finished", { color });

@@ -49,6 +49,18 @@ body {
   image-rendering: pixelated;
 }
 
+#star-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  image-rendering: pixelated;
+}
+#star-label img {
+  width: 13px;
+  height: 13px;
+  image-rendering: pixelated;
+}
+
 #settings-btn {
   background: none;
   border: none;
@@ -306,6 +318,10 @@ canvas {
   filter: brightness(0.78) saturate(0.7) drop-shadow(0 2px 0 rgba(0, 0, 0, 0.5));
   animation: captured-drop 0.4s ease-out;
   flex-shrink: 0;
+}
+.captured-side img.captured-cannon {
+  width: auto;
+  height: 52px;
 }
 @keyframes captured-drop {
   0%   { transform: translateY(-12px) rotate(-15deg); opacity: 0; }
@@ -1176,3 +1192,22 @@ canvas {
   display: block;
 }
 .wc-canvas-wrap canvas:hover { border-color: #ff8a3d; }
+
+/* ========== Piece tooltip (hover during setup) ========== */
+#piece-tooltip {
+  position: fixed;
+  z-index: 500;
+  background: #1e1430;
+  border: 2px solid #4fc3ff;
+  color: #c8e8ff;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 6px;
+  line-height: 1.7;
+  letter-spacing: 0.5px;
+  padding: 8px 10px;
+  pointer-events: none;
+  max-width: 220px;
+  box-shadow: 0 4px 0 #0a0818, 0 0 12px rgba(79,195,255,0.25);
+  white-space: pre-wrap;
+}
+#piece-tooltip.hidden { display: none; }

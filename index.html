@@ -47,6 +47,7 @@
         <span id="phase-label">Loading…</span>
         <span id="player-label"></span>
         <span id="coin-label"><img src="images/coin.png" alt="coin" /><span id="coin-value">0</span></span>
+        <span id="star-label"><img src="images/star.png" alt="star" /><span id="star-value">10</span></span>
         <button id="settings-btn" type="button" aria-label="Settings">
           <img src="images/Settings.png" alt="Settings" />
         </button>
@@ -235,6 +236,9 @@
       </div>
     </div>
   </div>
+
+  <!-- Piece tooltip shown on hover over opponent special pieces during setup -->
+  <div id="piece-tooltip" class="hidden"></div>
 
   <script src="game.js"></script>
   <script src="/socket.io/socket.io.js"></script>
