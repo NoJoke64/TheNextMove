@@ -1315,6 +1315,11 @@ function drawBoard() {
     if (cImg) {
       boardCtx.save();
       boardCtx.imageSmoothingEnabled = false;
+      // Glut: orange → rot, intensiviert mit Fortschritt
+      const glowG   = Math.round(180 - prog * 100);
+      const glowA   = 0.5 + prog * 0.5;
+      boardCtx.shadowColor = `rgba(255, ${glowG}, 20, ${glowA})`;
+      boardCtx.shadowBlur  = 6 + prog * 16;
       boardCtx.drawImage(cImg, px + Math.floor((CELL - 12) / 2), py + PIECE_VISUAL_OFFSET_Y, 12, 33);
       boardCtx.restore();
     }
@@ -2322,7 +2327,15 @@ function handleDrop(ptr, clientX, clientY) {
     if (state.online.active && window.Online) Online.emitMove(from, cell);
     state.selectedSquare = null;
     state.legalMoves = [];
-    if (isCannonDrop) { _startCannonAnimation(from, cell, cannonCapture, () => endPlayTurn()); return; }
+    if (isCannonDrop) {
+      const _cannonColor = state.current;
+      _startCannonAnimation(from, cell, cannonCapture, () => {
+        const backRank = _cannonColor === 0 ? 7 : 0;
+        if (cell.row === backRank) state.board[cell.row][cell.col] = null;
+        endPlayTurn();
+      });
+      return;
+    }
     endPlayTurn();
   }
 }
@@ -2377,7 +2390,15 @@ function handleBoardClick(row, col) {
         if (state.online.active && window.Online) Online.emitMove(sel, { row, col });
         state.selectedSquare = null;
         state.legalMoves = [];
-        if (isCannonClick) { _startCannonAnimation(sel, { row, col }, cannonCapture2, () => endPlayTurn()); return; }
+        if (isCannonClick) {
+          const _cannonColor2 = state.current;
+          _startCannonAnimation(sel, { row, col }, cannonCapture2, () => {
+            const backRank2 = _cannonColor2 === 0 ? 7 : 0;
+            if (row === backRank2) state.board[row][col] = null;
+            endPlayTurn();
+          });
+          return;
+        }
         endPlayTurn();
         return;
       }
@@ -3131,8 +3152,9 @@ function initHotbarConfig() {
       tile.className = "hc-tile" + (selected === type ? " hc-selected" : "");
 
       const img = document.createElement("img");
-      img.src = type === "20" ? "images/figures/2000.png" : `images/figures/${activePlayer}${type}0.png`;
+      img.src = type === "20" ? "images/figures/2002.png" : `images/figures/${activePlayer}${type}0.png`;
       img.alt = HC_NAMES[type];
+      if (type === "20") img.classList.add("cannon-img");
 
       const name = document.createElement("div");
       name.className = "hc-tile-name";
@@ -3174,8 +3196,9 @@ function initHotbarConfig() {
       num.textContent = "Slot " + (i + 1);
 
       const img = document.createElement("img");
-      img.src = type === "20" ? "images/figures/2000.png" : `images/figures/${activePlayer}${type}0.png`;
+      img.src = type === "20" ? "images/figures/2002.png" : `images/figures/${activePlayer}${type}0.png`;
       img.alt = HC_NAMES[type];
+      if (type === "20") img.classList.add("cannon-img");
 
       const cost = document.createElement("div");
       cost.className = "hc-slot-cost";

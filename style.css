@@ -505,6 +505,13 @@ canvas {
   image-rendering: pixelated;
   display: block;
 }
+.hc-tile img.cannon-img {
+  width: 40px; height: 75px;
+  object-fit: cover;
+  object-position: top center;
+  margin: 0 auto;
+  display: block;
+}
 .hc-tile-name {
   font-size: 5px;
   color: #f0e8d8;
@@ -555,6 +562,13 @@ canvas {
 .hc-slot img {
   width: 69px; height: 69px;
   image-rendering: pixelated;
+  display: block;
+}
+.hc-slot img.cannon-img {
+  width: 40px; height: 75px;
+  object-fit: cover;
+  object-position: top center;
+  margin: 0 auto;
   display: block;
 }
 .hc-slot-num {

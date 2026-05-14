@@ -368,7 +368,12 @@
     state.enPassant = newEnPassant || null;
     if (window.Sounds) Sounds.play("place");
     if (isCannonball) {
-      _startCannonAnimation(from, to, cannonCapture, () => drawAll());
+      const _oppColor = state.board[toRow][toCol]?.color ?? (1 - state.current);
+      _startCannonAnimation(from, to, cannonCapture, () => {
+        const backRank = _oppColor === 0 ? 7 : 0;
+        if (toRow === backRank) state.board[toRow][toCol] = null;
+        drawAll();
+      });
     } else {
       drawAll();
     }

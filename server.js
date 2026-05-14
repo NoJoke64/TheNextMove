@@ -625,8 +625,15 @@ io.on("connection", socket => {
       ? { row: (fromRow + toRow) / 2, col: fromCol }
       : null;
 
+    const isCannonMove = piece.type === "20";
     const captured = applyMoveServer(g.board, from, to, { isEnPassant: move.isEnPassant });
     if (captured) g.captured[captured.color].push({ ...captured });
+
+    // Cannonball disappears when it reaches the opponent's back rank
+    if (isCannonMove) {
+      const backRank = color === 0 ? 7 : 0;
+      if (toRow === backRank) g.board[toRow][toCol] = null;
+    }
 
     g.enPassant = newEnPassant;
     g.current = 1 - color;
